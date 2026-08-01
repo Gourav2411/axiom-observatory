@@ -187,6 +187,8 @@ test("retrieval returns a structured 404 for a missing ephemeral run", async () 
 
 function createSupabaseMock() {
   const snapshots = new Map();
+  const normalizedRuns = new Map();
+  const chunkEmbeddings = new Map();
   const requests = [];
   const fetch = async (input, init = {}) => {
     const url = new URL(input);
@@ -200,6 +202,99 @@ function createSupabaseMock() {
       assert.equal(headers.get("authorization"), `Bearer ${TEST_ACCESS_TOKEN}`);
       assert.equal(init.body, "{}");
       return Response.json(TEST_WORKSPACE_ID);
+    }
+
+    if (url.pathname === "/rest/v1/rpc/persist_evidence_run_v1") {
+      assert.equal(headers.get("authorization"), `Bearer ${TEST_ACCESS_TOKEN}`);
+      const { p_payload: payload } = JSON.parse(init.body);
+      assert.equal(payload.run.id, payload.snapshot.id);
+      assert.equal(payload.sources.length, 3);
+      assert.equal(payload.evidenceRecords.length, 1);
+      assert.equal(payload.literatureRecords.length, 1);
+      assert.equal(payload.documents.length, 2);
+      assert.equal(payload.chunks.length, 2);
+      normalizedRuns.set(payload.run.id, payload);
+      snapshots.set(payload.run.id, { snapshot: payload.snapshot });
+      return Response.json({
+        runId: payload.run.id,
+        workspaceId: TEST_WORKSPACE_ID,
+        sources: payload.sources.length,
+        documents: payload.documents.length,
+        chunks: payload.chunks.length,
+      });
+    }
+
+    if (url.pathname === "/rest/v1/document_chunks") {
+      assert.equal(headers.get("authorization"), `Bearer ${TEST_ACCESS_TOKEN}`);
+      const runId = url.searchParams.get("run_id")?.replace(/^eq\./, "");
+      const payload = normalizedRuns.get(runId);
+      return Response.json((payload?.chunks ?? [])
+        .filter((chunk) => !chunkEmbeddings.has(chunk.id))
+        .map((chunk) => ({
+          id: chunk.id,
+          content: chunk.content,
+          content_sha256: chunk.contentSha256,
+          chunk_index: chunk.chunkIndex,
+        })));
+    }
+
+    if (url.pathname === "/rest/v1/rpc/apply_chunk_embeddings_v1") {
+      assert.equal(headers.get("authorization"), "Bearer test-service-role-key");
+      const body = JSON.parse(init.body);
+      assert.equal(body.p_model, "Supabase/gte-small");
+      assert.equal(body.p_revision, "supabase-edge-runtime-managed");
+      for (const item of body.p_items) {
+        assert.equal(item.embedding.length, 384);
+        chunkEmbeddings.set(item.id, item.embedding);
+      }
+      const total = normalizedRuns.get(body.p_run_id)?.chunks.length ?? 0;
+      if (body.p_complete) assert.equal(chunkEmbeddings.size, total);
+      return Response.json({ embeddedChunks: chunkEmbeddings.size, totalChunks: total });
+    }
+
+    if (url.pathname === "/rest/v1/rpc/execute_run_retrieval_v2") {
+      assert.equal(headers.get("authorization"), `Bearer ${TEST_ACCESS_TOKEN}`);
+      const body = JSON.parse(init.body);
+      assert.equal(body.p_query_embedding.length, 384);
+      assert.equal(body.p_top_k, 1);
+      const payload = normalizedRuns.get(body.p_run_id);
+      const document = payload.documents.find((item) => item.documentKind === "europe_pmc_literature");
+      const chunk = payload.chunks.find((item) => item.documentId === document.id);
+      return Response.json({
+        retrievalId: "33333333-3333-4333-8333-333333333333",
+        query: body.p_query_text,
+        retrievalMode: "hybrid_rrf_v2",
+        generated: false,
+        totalCandidates: payload.chunks.length,
+        embedding: {
+          model: body.p_embedding_model,
+          revision: body.p_embedding_revision,
+          dimensions: 384,
+          normalized: true,
+        },
+        workflow: [
+          { step: "planner", label: "Query planner", status: "completed" },
+          { step: "hybrid_retriever", label: "Hybrid retriever", status: "completed" },
+          { step: "citation_guard", label: "Citation guard", status: "completed" },
+        ],
+        results: [{
+          id: chunk.id,
+          chunkId: chunk.id,
+          documentId: document.id,
+          sourceType: document.documentKind,
+          title: document.title,
+          excerpt: chunk.content,
+          score: 0.031,
+          scoreMeaning: "Reciprocal-rank-fusion score; not probability or confidence.",
+          sourceUrl: document.sourceUrl,
+          citations: document.metadata.citations,
+          provenance: document.metadata.provenance,
+          scores: { lexical: 0.2, vector: 0.8, fused: 0.031 },
+          ranks: { lexical: 2, semantic: 1 },
+        }],
+        citationAudit: { status: "passed", coverage: 1, citedResults: 1, totalResults: 1 },
+        warnings: ["Hybrid scores are ranking signals, not confidence estimates."],
+      });
     }
 
     assert.equal(url.pathname, "/rest/v1/run_snapshots");
@@ -222,7 +317,26 @@ function createSupabaseMock() {
     const row = id ? snapshots.get(id) : null;
     return Response.json(row ? [{ snapshot: row.snapshot }] : []);
   };
-  return { fetch, requests, snapshots };
+  const embeddingFetch = async (input, init = {}) => {
+    assert.equal(new URL(input).pathname, "/functions/v1/axiom-embed");
+    const headers = new Headers(init.headers);
+    assert.equal(headers.get("apikey"), "test-service-role-key");
+    assert.equal(headers.get("authorization"), `Bearer ${TEST_ACCESS_TOKEN}`);
+    assert.equal(headers.get("x-axiom-internal-key"), "test-service-role-key");
+    const { items } = JSON.parse(init.body);
+    const value = 1 / Math.sqrt(384);
+    return Response.json({
+      model: "Supabase/gte-small",
+      revision: "supabase-edge-runtime-managed",
+      dimensions: 384,
+      normalized: true,
+      embeddings: items.map((item) => ({
+        id: item.id,
+        embedding: Array.from({ length: 384 }, () => value),
+      })),
+    });
+  };
+  return { fetch, embeddingFetch, requests, snapshots, normalizedRuns, chunkEmbeddings };
 }
 
 test("Supabase repository persists and retrieves the durable run snapshot", async () => {
@@ -232,6 +346,7 @@ test("Supabase repository persists and retrieves the durable run snapshot", asyn
     SUPABASE_URL: "https://project.supabase.co",
     SUPABASE_SERVICE_ROLE_KEY: "test-service-role-key",
     SUPABASE_FETCH: supabase.fetch,
+    EMBEDDING_FETCH: supabase.embeddingFetch,
     AUTH_FETCH: mockAuth,
   };
 
@@ -260,14 +375,44 @@ test("Supabase repository persists and retrieves the durable run snapshot", asyn
   assert.deepEqual(run.persistence, health.persistence);
   assert.equal(run.workspaceId, TEST_WORKSPACE_ID);
   assert.equal(run.createdBy, TEST_USER_ID);
+  assert.equal(run.rag.status, "completed");
+  assert.equal(run.rag.mode, "hybrid_rrf_v2");
+  assert.equal(run.rag.counts.embeddedChunks, 2);
   assert.doesNotMatch(run.warnings.join(" "), /ephemeral/i);
   assert.equal(supabase.snapshots.get(run.id).snapshot.id, run.id);
   assert.deepEqual(supabase.snapshots.get(run.id).snapshot.persistence, health.persistence);
+  assert.equal(supabase.normalizedRuns.get(run.id).documents.length, 2);
+  assert.equal(supabase.chunkEmbeddings.size, 2);
 
   const readResponse = await worker.fetch(authRequest(`https://example.test/api/runs/${run.id}`), supabaseEnv);
   assert.equal(readResponse.status, 200);
   assert.deepEqual(await readResponse.json(), run);
-  assert.deepEqual(supabase.requests.map((request) => request.method), ["GET", "POST", "POST", "GET"]);
+
+  const retrievalResponse = await worker.fetch(authRequest(`https://example.test/api/runs/${run.id}/retrieval`, {
+    method: "POST",
+    body: JSON.stringify({ query: "fibrotic kinase", topK: 1 }),
+  }), supabaseEnv);
+  const retrieval = await retrievalResponse.json();
+  assert.equal(retrievalResponse.status, 200);
+  assert.equal(retrieval.retrievalMode, "hybrid_rrf_v2");
+  assert.equal(retrieval.generated, false);
+  assert.equal(retrieval.embedding.model, "Supabase/gte-small");
+  assert.equal(retrieval.results[0].sourceType, "europe_pmc_literature");
+  assert.deepEqual(retrieval.results[0].citations, ["PMID:123456", "DOI:10.1000/demo.1"]);
+  assert.match(retrieval.results[0].scoreMeaning, /not probability or confidence/i);
+  assert.equal(retrieval.citationAudit.coverage, 1);
+
+  assert.deepEqual(supabase.requests.map((request) => request.url.pathname), [
+    "/rest/v1/run_snapshots",
+    "/rest/v1/rpc/ensure_default_workspace",
+    "/rest/v1/rpc/persist_evidence_run_v1",
+    "/rest/v1/document_chunks",
+    "/rest/v1/rpc/apply_chunk_embeddings_v1",
+    "/rest/v1/run_snapshots",
+    "/rest/v1/run_snapshots",
+    "/rest/v1/run_snapshots",
+    "/rest/v1/rpc/execute_run_retrieval_v2",
+  ]);
   assert.doesNotMatch(JSON.stringify(health), /test-service-role-key/);
   assert.doesNotMatch(JSON.stringify(run), /test-service-role-key/);
 });

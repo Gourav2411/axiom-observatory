@@ -1,7 +1,16 @@
 const OPEN_TARGETS_URL = "https://api.platform.opentargets.org/api/v4/graphql";
 const EUROPE_PMC_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search";
-const RUN_SCHEMA_VERSION = "1.1.0";
+const RUN_SCHEMA_VERSION = "2.0.0";
 import { PersistenceError, createRunRepository } from "./run-repository.js";
+import {
+  CHUNKING_STRATEGY,
+  CHUNK_MAX_WORDS,
+  CHUNK_OVERLAP_WORDS,
+  EMBEDDING_DIMENSIONS,
+  EMBEDDING_MODEL,
+  EMBEDDING_REVISION,
+  buildNormalizedRunPayload,
+} from "./rag-pipeline.js";
 
 class AuthenticationError extends Error {
   constructor(message, code = "authentication_required") {
@@ -362,19 +371,37 @@ function lexicalRetrieve(run, query, topK) {
     .sort((left, right) => right.score - left.score
       || left.sourceType.localeCompare(right.sourceType)
       || left.id.localeCompare(right.id))
-    .slice(0, topK);
+    .slice(0, topK)
+    .map((result, index) => ({
+      ...result,
+      ranks: { lexical: index + 1, semantic: null },
+      scores: { lexical: result.score, vector: null, fused: result.score },
+    }));
 
   const warnings = [
     "Results are lexical retrieval records, not a generated answer or scientific conclusion.",
     "Lexical relevance scores are ranking values, not probabilities or confidence estimates.",
   ];
   if (!results.length) warnings.push("No candidate contained a query term.");
+  const citedResults = results.filter((result) => result.citations?.length).length;
   return {
     query,
     retrievalMode: "lexical_rank_v1",
     generated: false,
     totalCandidates: candidates.length,
+    embedding: null,
+    workflow: [
+      { step: "planner", label: "Query planner", status: "completed" },
+      { step: "lexical_retriever", label: "Lexical retriever", status: "completed" },
+      { step: "citation_guard", label: "Citation guard", status: "completed" },
+    ],
     results,
+    citationAudit: {
+      status: citedResults === results.length ? "passed" : "incomplete",
+      coverage: results.length ? citedResults / results.length : 1,
+      citedResults,
+      totalResults: results.length,
+    },
     warnings,
   };
 }
@@ -398,6 +425,124 @@ function unavailableStages() {
       reason: "Install and register AiZynthFinder before this stage can run.",
     }),
   ];
+}
+
+function ragIndexStage(durable) {
+  return createStage(
+    "rag_index",
+    "Hybrid RAG index",
+    durable ? "Supabase gte-small + pgvector" : "Durable Supabase required",
+    durable ? "pending" : "not_configured",
+    {
+      evidenceKind: "retrieval_index",
+      model: durable ? EMBEDDING_MODEL : null,
+      revision: durable ? EMBEDDING_REVISION : null,
+      dimensions: durable ? EMBEDDING_DIMENSIONS : null,
+      reason: durable ? null : "Configure durable Supabase persistence to build the normalized hybrid index.",
+    },
+  );
+}
+
+function initialRagState(durable) {
+  return {
+    status: durable ? "pending" : "lexical_only",
+    mode: durable ? "normalizing" : "lexical_rank_v1",
+    model: durable ? EMBEDDING_MODEL : null,
+    revision: durable ? EMBEDDING_REVISION : null,
+    dimensions: durable ? EMBEDDING_DIMENSIONS : null,
+    normalized: durable ? true : null,
+    counts: {
+      sources: 0,
+      evidenceRecords: 0,
+      literatureRecords: 0,
+      documents: 0,
+      chunks: 0,
+      embeddedChunks: 0,
+    },
+    chunking: {
+      strategy: CHUNKING_STRATEGY,
+      maxWords: CHUNK_MAX_WORDS,
+      overlapWords: CHUNK_OVERLAP_WORDS,
+    },
+    fallbackReason: durable ? null : "Hybrid retrieval requires the normalized Supabase index.",
+  };
+}
+
+async function persistAndIndexRun(run, repository) {
+  run.stages = Array.isArray(run.stages) ? run.stages : [];
+  run.warnings = Array.isArray(run.warnings) ? run.warnings : [];
+  run.capabilities = run.capabilities && typeof run.capabilities === "object"
+    ? run.capabilities
+    : { retrieval: true };
+  if (!run.stages.some((stage) => stage.id === "rag_index")) {
+    const firstUnavailable = run.stages.findIndex((stage) => stage.status === "not_configured");
+    const insertAt = firstUnavailable >= 0 ? firstUnavailable : run.stages.length;
+    run.stages.splice(insertAt, 0, ragIndexStage(repository.persistence.durable));
+  }
+  run.rag = initialRagState(repository.persistence.durable);
+
+  if (!repository.persistence.durable) {
+    run.capabilities.hybridRetrieval = false;
+    run.capabilities.openSourceEmbeddings = false;
+    return repository.put(run);
+  }
+
+  const normalized = await buildNormalizedRunPayload(run);
+  run.rag = {
+    ...run.rag,
+    status: "indexing",
+    mode: "postgres_fts_v1",
+    counts: normalized.counts,
+  };
+  await repository.ingest(run, normalized.payload);
+
+  const stage = run.stages.find((item) => item.id === "rag_index");
+  try {
+    const indexSummary = await repository.index(run.id);
+    const embeddedChunks = Number(
+      indexSummary.embeddedChunks
+      ?? indexSummary.embedded_chunks
+      ?? normalized.counts.chunks,
+    );
+    run.rag = {
+      ...run.rag,
+      status: "completed",
+      mode: "hybrid_rrf_v2",
+      counts: { ...run.rag.counts, embeddedChunks },
+      fallbackReason: null,
+    };
+    Object.assign(stage, {
+      status: "completed",
+      itemCount: embeddedChunks,
+      totalChunks: normalized.counts.chunks,
+      evidenceKind: "retrieval_index",
+    });
+    run.capabilities.hybridRetrieval = true;
+    run.capabilities.openSourceEmbeddings = true;
+  } catch (error) {
+    const failure = {
+      code: typeof error?.code === "string" && /^[a-z0-9_]+$/i.test(error.code)
+        ? error.code
+        : "rag_index_unavailable",
+      ...(Number.isInteger(error?.status) ? { upstreamStatus: error.status } : {}),
+    };
+    run.rag = {
+      ...run.rag,
+      status: "failed",
+      mode: "postgres_fts_v1",
+      fallbackReason: "The open-source embedding index is unavailable; database lexical retrieval remains available.",
+      failure,
+    };
+    Object.assign(stage, {
+      status: "failed",
+      error: failure,
+    });
+    run.capabilities.hybridRetrieval = false;
+    run.capabilities.openSourceEmbeddings = false;
+    run.warnings.push("Hybrid indexing did not complete. Retrieval will use the normalized Postgres lexical index until indexing succeeds.");
+  }
+  run.updatedAt = new Date().toISOString();
+  return repository.put(run);
 }
 
 async function createRun(transport, input, appEnv, repository) {
@@ -512,7 +657,7 @@ async function createRun(transport, input, appEnv, repository) {
     warnings.push(`Europe PMC retrieval failed: ${error.message}`);
   }
 
-  stages.push(...unavailableStages());
+  stages.push(ragIndexStage(repository.persistence.durable), ...unavailableStages());
   const completedSources = stages.filter((stage) => stage.status === "completed").length;
   const run = {
     schemaVersion: RUN_SCHEMA_VERSION,
@@ -540,14 +685,17 @@ async function createRun(transport, input, appEnv, repository) {
       openTargets: true,
       europePmc: true,
       retrieval: true,
+      hybridRetrieval: false,
+      openSourceEmbeddings: false,
       docking: false,
       admet: false,
       retrosynthesis: false,
       generation: false,
     },
+    rag: initialRagState(repository.persistence.durable),
     warnings,
   };
-  return repository.put(run);
+  return persistAndIndexRun(run, repository);
 }
 
 function validateRunInput(value) {
@@ -575,13 +723,33 @@ async function handleApi(request, env = {}) {
   const baseRepository = createRunRepository(env);
   if (url.pathname === "/api/health" && request.method === "GET") {
     const persistence = await baseRepository.health();
+    const hybridConfigured = persistence.mode === "supabase_postgres"
+      && persistence.configured
+      && persistence.available;
     return json({
       status: persistence.available === false ? "degraded" : "ok",
       service: "axiom-evidence-api",
       schemaVersion: RUN_SCHEMA_VERSION,
       persistence,
       authRequired: persistence.mode === "supabase_postgres" && persistence.configured,
-      capabilities: { openTargets: true, europePmc: true, retrieval: true, docking: false, admet: false, retrosynthesis: false, generation: false },
+      capabilities: {
+        openTargets: true,
+        europePmc: true,
+        retrieval: true,
+        hybridRetrieval: hybridConfigured,
+        openSourceEmbeddings: hybridConfigured,
+        docking: false,
+        admet: false,
+        retrosynthesis: false,
+        generation: false,
+      },
+      rag: {
+        defaultMode: hybridConfigured ? "hybrid_rrf_v2" : "lexical_rank_v1",
+        model: hybridConfigured ? EMBEDDING_MODEL : null,
+        revision: hybridConfigured ? EMBEDDING_REVISION : null,
+        dimensions: hybridConfigured ? EMBEDDING_DIMENSIONS : null,
+        generated: false,
+      },
     });
   }
 
@@ -615,8 +783,9 @@ async function handleApi(request, env = {}) {
   const retrievalMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/retrieval$/);
   if (retrievalMatch && request.method === "POST") {
     let run;
+    let repository;
     try {
-      const repository = await repositoryForRequest(request, env, baseRepository);
+      repository = await repositoryForRequest(request, env, baseRepository);
       run = await repository.get(retrievalMatch[1]);
     } catch (error) {
       const handled = handledInfrastructureError(error);
@@ -634,6 +803,16 @@ async function handleApi(request, env = {}) {
     const validationError = validateRetrievalInput(input);
     if (validationError) return apiError("invalid_input", validationError, 400);
     const query = input.query.trim();
+    if (repository.persistence.durable) {
+      try {
+        if (run.rag?.status !== "completed") run = await persistAndIndexRun(run, repository);
+        return json(await repository.retrieve(run.id, query, input.topK ?? 5));
+      } catch (error) {
+        const handled = handledInfrastructureError(error);
+        if (handled) return handled;
+        throw error;
+      }
+    }
     return json(lexicalRetrieve(run, query, input.topK ?? 5));
   }
 

@@ -8,6 +8,15 @@ import { api } from "./api.js";
 import { supabase, supabaseBrowserConfigured } from "./supabase.js";
 
 const SAVED_RUN_KEY = "axiom:last-evidence-run";
+const RUN_TABS = ["Research", "Index", "Evidence", "Literature", "Provenance", "Capabilities"];
+const INDEX_COUNTS = [
+  ["sources", "Sources"],
+  ["evidenceRecords", "Evidence records"],
+  ["literatureRecords", "Literature records"],
+  ["documents", "Documents"],
+  ["chunks", "Chunks"],
+  ["embeddedChunks", "Embedded chunks"],
+];
 
 function savedRunId() {
   try {
@@ -27,13 +36,46 @@ function persistenceState(value) {
   };
 }
 
+function humanize(value) {
+  return String(value ?? "").replaceAll("_", " ").replace(/([a-z])([A-Z])/g, "$1 $2").trim();
+}
+
+function present(value) {
+  return value !== undefined && value !== null && value !== "";
+}
+
+function displayValue(value) {
+  return present(value) ? String(value) : "Unavailable";
+}
+
+function decimal(value, places = 3) {
+  return typeof value === "number" && Number.isFinite(value) ? value.toFixed(places) : "Unavailable";
+}
+
+function retrievalMode(value) {
+  const raw = present(value) ? String(value) : "";
+  const normalized = raw.toLowerCase();
+  if (normalized.includes("hybrid")) return { kind: "hybrid", label: "Hybrid retrieval", raw };
+  if (normalized.includes("lexical")) return { kind: "lexical", label: "Lexical retrieval", raw };
+  return { kind: raw ? "reported" : "unavailable", label: raw ? humanize(raw) : "Mode unavailable", raw };
+}
+
+function statusTone(status) {
+  const value = String(status ?? "").toLowerCase();
+  if (["completed", "complete", "available", "connected", "configured", "enabled", "ok", "passed", "ready", "success"].includes(value)) return "available";
+  if (["degraded", "fallback", "partial", "warning"].includes(value)) return "degraded";
+  if (["running", "active", "in_progress", "processing"].includes(value)) return "active";
+  return "unavailable";
+}
+
 function StageCard({ stage, selected, onClick }) {
   const status = stage.status ?? "unknown";
-  return <button className={`live-stage live-${status} ${selected ? "is-selected" : ""}`} onClick={onClick}>
-    <div className="live-stage-head"><span>{stage.id === "evidence" ? <Database/> : stage.id === "literature" ? <MagnifyingGlass/> : <Flask/>}</span><strong>{stage.label}</strong><i>{status.replaceAll("_", " ")}</i></div>
-    <h3>{stage.service}</h3>
-    <p>{stage.reason ?? `${stage.itemCount ?? 0} retrieved records`}</p>
-    <footer>{stage.evidenceKind?.replaceAll("_", " ") ?? "service state"}</footer>
+  const itemSummary = present(stage.itemCount) ? `${stage.itemCount} retrieved records` : "Item count unavailable";
+  return <button type="button" className={`live-stage live-${status} ${selected ? "is-selected" : ""}`} onClick={onClick} aria-pressed={selected}>
+    <div className="live-stage-head"><span>{stage.id === "evidence" || stage.id === "rag_index" ? <Database/> : stage.id === "literature" ? <MagnifyingGlass/> : <Flask/>}</span><strong>{stage.label || humanize(stage.id) || "Unnamed stage"}</strong><i>{humanize(status)}</i></div>
+    <h3>{stage.service || "Service unavailable"}</h3>
+    <p>{stage.reason ?? itemSummary}</p>
+    <span className="live-stage-foot">{stage.evidenceKind ? humanize(stage.evidenceKind) : "Stage metadata unavailable"}</span>
   </button>;
 }
 
@@ -106,11 +148,72 @@ function Literature({ run }) {
   return <div className="live-literature">{items.map(item=><article key={item.id}><div><span>{item.publicationDate||"Date unavailable"}</span><span>{item.citedByCount} citations</span>{item.isOpenAccess&&<span className="oa">Open access</span>}</div><h3>{item.title}</h3><p>{item.authors||"Authors unavailable"} · {item.journal||"Journal unavailable"}</p>{item.sourceUrl&&<a href={item.sourceUrl} target="_blank" rel="noreferrer">Open source record <ArrowSquareOut/></a>}</article>)}</div>;
 }
 
+function RetrievalWorkflow({ retrieval, mode, waiting }) {
+  const reported = Array.isArray(retrieval?.workflow) && retrieval.workflow.length > 0;
+  const waitingStatus = waiting ? "awaiting_response" : retrieval ? "status_unavailable" : "not_run";
+  const steps = reported ? retrieval.workflow : [
+    { step: "planner", label: "Planner", status: waitingStatus },
+    { step: "retriever", label: mode.kind === "lexical" ? "Lexical retriever" : "Hybrid retriever", status: waitingStatus },
+    { step: "citation_guard", label: "Citation guard", status: waitingStatus },
+  ];
+  return <section className="live-agent-workflow" aria-label="Retrieval agent workflow">
+    <header><span>Agent workflow</span><small>{reported ? "Server-reported execution" : waiting ? "Awaiting server report" : retrieval ? "Execution details unavailable" : "Not run"}</small></header>
+    <div>{steps.map((step, index) => {
+      const status = step?.status ?? "unavailable";
+      return <div className={`live-agent-step is-${statusTone(status)}`} key={step?.step ?? `${step?.label}-${index}`}>
+        <i aria-hidden="true">{String(index + 1).padStart(2, "0")}</i>
+        <span><strong>{step?.label || humanize(step?.step) || "Unnamed step"}</strong><small>{humanize(status)}</small></span>
+      </div>;
+    })}</div>
+  </section>;
+}
+
+function coverageValue(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return displayValue(value);
+  const percentage = value <= 1 ? value * 100 : value;
+  return `${percentage.toFixed(Number.isInteger(percentage) ? 0 : 1)}%`;
+}
+
+function CitationAudit({ audit }) {
+  if (!audit || typeof audit !== "object") return <section className="live-citation-audit is-unavailable" aria-label="Citation audit unavailable">
+    <ShieldWarning/><span><strong>Citation audit unavailable</strong><small>No citation audit was returned for this retrieval.</small></span><b>—</b>
+  </section>;
+  const status = audit.status ?? "unavailable";
+  const totalsAvailable = present(audit.citedResults) && present(audit.totalResults);
+  return <section className={`live-citation-audit is-${statusTone(status)}`} aria-label="Citation audit">
+    {statusTone(status) === "available" ? <CheckCircle/> : <ShieldWarning/>}
+    <span><strong>Citation guard · {humanize(status)}</strong><small>{totalsAvailable ? `${audit.citedResults} of ${audit.totalResults} results cited` : "Cited-result totals unavailable"}</small></span>
+    <b>{present(audit.coverage) ? coverageValue(audit.coverage) : "Unavailable"}</b>
+  </section>;
+}
+
+function ResultScores({ result }) {
+  const scores = result.scores && typeof result.scores === "object" ? result.scores : {};
+  const ranks = result.ranks && typeof result.ranks === "object" ? result.ranks : {};
+  const scoreItems = [
+    [present(scores.fused) ? "Fused ranking" : "Ranking score", present(scores.fused) ? scores.fused : result.score],
+    ["Lexical ranking", scores.lexical],
+    ["Vector similarity", scores.vector],
+  ].filter(([, value]) => present(value));
+  const rankItems = [
+    ["Lexical rank", ranks.lexical],
+    ["Semantic rank", ranks.semantic],
+  ].filter(([, value]) => present(value));
+  if (!scoreItems.length && !rankItems.length) return <small className="live-score-unavailable">Ranking details unavailable</small>;
+  return <dl className="live-result-scores">
+    {scoreItems.map(([label, value])=><div key={label}><dt>{label}</dt><dd>{decimal(value)}</dd></div>)}
+    {rankItems.map(([label, value])=><div key={label}><dt>{label}</dt><dd>#{value}</dd></div>)}
+  </dl>;
+}
+
 function Research({ run, accessToken }) {
   const [question, setQuestion] = useState(`What evidence links ${run.target?.label ?? "this target"} to ${run.disease?.label ?? "this disease"}?`);
   const [retrieval, setRetrieval] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const indexMode = retrievalMode(run.rag?.mode);
+  const responseMode = retrievalMode(retrieval?.retrievalMode ?? retrieval?.mode ?? run.rag?.mode);
+  const results = Array.isArray(retrieval?.results) ? retrieval.results : [];
 
   const submit = async (event) => {
     event.preventDefault();
@@ -119,7 +222,9 @@ function Research({ run, accessToken }) {
     setLoading(true);
     setError("");
     try {
-      setRetrieval(await api.retrieveRun(run.id, { query, topK: 8 }, accessToken));
+      const request = { query, topK: 8 };
+      if (["hybrid", "lexical"].includes(indexMode.kind)) request.mode = indexMode.kind;
+      setRetrieval(await api.retrieveRun(run.id, request, accessToken));
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -135,25 +240,99 @@ function Research({ run, accessToken }) {
     <form className="live-research-form" onSubmit={submit} aria-busy={loading}>
       <label htmlFor="live-research-question">Research question</label>
       <div><MagnifyingGlass/><input id="live-research-question" value={question} onChange={(event)=>setQuestion(event.target.value)} placeholder="Ask about mechanisms, evidence, or literature" aria-describedby="live-research-help"/><button type="submit" disabled={loading || question.trim().length < 3}>{loading ? "Retrieving…" : "Retrieve passages"}</button></div>
-      <small id="live-research-help">Lexical ranking across this run's evidence records and literature metadata.</small>
+      <small id="live-research-help">{indexMode.kind === "hybrid" ? "Hybrid retrieval is requested from this run's indexed evidence; the response reports the actual mode used." : indexMode.kind === "lexical" ? "Lexical ranking is available for this run; no vector similarity is implied." : "The API response will report the ranking mode used for this run."}</small>
     </form>
+    <RetrievalWorkflow retrieval={retrieval} mode={responseMode} waiting={loading}/>
     {error && <div className="live-error" role="alert"><Warning/><span><strong>Retrieval failed</strong><small>{error}</small></span></div>}
     {loading && <div className="live-retrieval-loading" role="status" aria-live="polite"><span/><p>Ranking grounded passages…</p></div>}
     {!loading && retrieval && <section className="live-retrieval-results" aria-live="polite">
-      <header><div><span>{retrieval.results?.length ?? 0} ranked passages</span><small>{retrieval.totalCandidates ?? 0} candidates · {(retrieval.retrievalMode ?? "retrieval").replaceAll("_", " ")}</small></div><strong>{retrieval.generated === false ? "Retrieval only" : "Generated output"}</strong></header>
-      {retrieval.warnings?.map((warning)=><p className="live-retrieval-warning" key={warning}><Warning/>{warning}</p>)}
-      {(retrieval.results?.length ?? 0) === 0 ? <Empty title="No matching passages" detail="Try a more specific target, mechanism, study, or disease phrase."/> : <div className="live-retrieval-list">{retrieval.results.map((result, index)=><article key={result.id}>
-        <div className="live-retrieval-rank"><span>{String(index + 1).padStart(2, "0")}</span><strong>{Number(result.score ?? 0).toFixed(3)}</strong></div>
-        <div className="live-retrieval-copy"><div><span>{result.sourceType?.replaceAll("_", " ") ?? "source"}</span>{result.citations?.slice(0, 3).map((citation)=><code key={citation}>{citation}</code>)}</div><h3>{result.title || "Untitled source record"}</h3><p>{result.excerpt || "No excerpt returned."}</p>{result.sourceUrl && <a href={result.sourceUrl} target="_blank" rel="noreferrer">Open source record <ArrowSquareOut/></a>}</div>
+      <header><div><span>{results.length} ranked passages</span><small>{present(retrieval.totalCandidates) ? `${retrieval.totalCandidates} candidates` : "Candidate count unavailable"}{responseMode.raw ? ` · ${humanize(responseMode.raw)}` : ""}</small>{retrieval.embedding && <em>{[retrieval.embedding.model, retrieval.embedding.revision, present(retrieval.embedding.dimensions) ? `${retrieval.embedding.dimensions} dimensions` : null].filter(present).join(" · ") || "Embedding metadata unavailable"}</em>}</div><div className="live-retrieval-badges"><strong className={`live-mode-badge is-${responseMode.kind}`}>{responseMode.label}</strong><strong className={`live-generation-badge ${retrieval.generated === false ? "is-safe" : retrieval.generated === true ? "is-generated" : "is-unavailable"}`}>{retrieval.generated === false ? "Retrieval only" : retrieval.generated === true ? "Generation reported" : "Generation status unavailable"}</strong></div></header>
+      <CitationAudit audit={retrieval.citationAudit}/>
+      {retrieval.warnings?.map((warning,index)=><p className="live-retrieval-warning" key={`${warning}-${index}`}><Warning/>{warning}</p>)}
+      {results.length === 0 ? <Empty title="No matching passages" detail="Try a more specific target, mechanism, study, or disease phrase."/> : <div className="live-retrieval-list">{results.map((result, index)=><article key={result.id ?? index}>
+        <div className="live-retrieval-rank"><span>Result rank</span><strong>{String(index + 1).padStart(2, "0")}</strong></div>
+        <div className="live-retrieval-copy"><div><span>{result.sourceType ? humanize(result.sourceType) : "Source type unavailable"}</span>{result.citations?.slice(0, 3).map((citation,index)=>{const label=typeof citation === "string" ? citation : citation?.id ?? citation?.label; return present(label) ? <code key={`${label}-${index}`}>{label}</code> : null;})}</div><h3>{result.title || "Untitled source record"}</h3><p>{result.excerpt || "No excerpt returned."}</p><ResultScores result={result}/>{result.sourceUrl && <a href={result.sourceUrl} target="_blank" rel="noreferrer">Open source record <ArrowSquareOut/></a>}</div>
       </article>)}</div>}
     </section>}
     {!loading && !retrieval && <div className="live-research-empty"><Database/><p>Enter a question to retrieve the most relevant grounded passages from this run.</p></div>}
   </div>;
 }
 
+function RagIndex({ run }) {
+  const rag = run.rag;
+  if (!rag || typeof rag !== "object") return <Empty title="RAG index unavailable" detail="This run did not return normalized index metadata. Retrieval may still report a lexical fallback, but no hybrid index is implied."/>;
+  const stage = run.stages?.find((item)=>item.id === "rag_index");
+  const status = rag.status ?? stage?.status ?? "unavailable";
+  const mode = retrievalMode(rag.mode);
+  const normalized = rag.normalized === true ? "Complete" : rag.normalized === false ? "Not complete" : displayValue(rag.normalized);
+  return <div className="live-index">
+    <header className="live-index-header">
+      <div><span className="live-kicker"><Database/> Retrieval index</span><h2>Normalized evidence index</h2><p>Inspectable ingestion, chunking, and embedding metadata for this run. These fields describe retrieval infrastructure, not scientific validation.</p></div>
+      <div className="live-index-state"><strong className={`is-${statusTone(status)}`}>{humanize(status)}</strong><span className={`live-mode-badge is-${mode.kind}`}>{mode.label}</span></div>
+    </header>
+    <section className="live-index-counts" aria-label="Indexed record counts">
+      {INDEX_COUNTS.map(([key,label])=><div key={key}><span>{label}</span><strong>{present(rag.counts?.[key]) ? rag.counts[key] : "—"}</strong><small>{present(rag.counts?.[key]) ? "Reported by index" : "Unavailable"}</small></div>)}
+    </section>
+    <div className="live-index-grid">
+      <section><header><span>Embedding provenance</span><small>Model identity</small></header><dl>
+        <div><dt>Model</dt><dd>{displayValue(rag.model)}</dd></div>
+        <div><dt>Revision</dt><dd><code>{displayValue(rag.revision)}</code></dd></div>
+        <div><dt>Dimensions</dt><dd>{displayValue(rag.dimensions)}</dd></div>
+        <div><dt>Index mode</dt><dd>{displayValue(rag.mode)}</dd></div>
+        <div><dt>Normalized</dt><dd>{normalized}</dd></div>
+      </dl></section>
+      <section><header><span>Chunking policy</span><small>Reported configuration</small></header><dl>
+        <div><dt>Strategy</dt><dd>{displayValue(rag.chunking?.strategy)}</dd></div>
+        <div><dt>Maximum words</dt><dd>{displayValue(rag.chunking?.maxWords)}</dd></div>
+        <div><dt>Overlap words</dt><dd>{displayValue(rag.chunking?.overlapWords)}</dd></div>
+      </dl></section>
+    </div>
+    <section className={`live-index-fallback ${present(rag.fallbackReason) ? "has-reason" : ""}`}>
+      {present(rag.fallbackReason) ? <Warning/> : <ShieldWarning/>}<span><strong>{present(rag.fallbackReason) ? "Retrieval fallback reported" : "Fallback reason unavailable"}</strong><small>{present(rag.fallbackReason) ? rag.fallbackReason : "The run did not report a fallback reason. Check each retrieval response for its actual mode."}</small></span>
+    </section>
+    <div className="live-index-boundary" role="note"><ShieldWarning/><span><strong>Indexing is not validation</strong><small>Embeddings and rankings organize source passages. They do not establish causality, efficacy, binding, safety, or toxicity.</small></span></div>
+  </div>;
+}
+
 function Provenance({run}) { return <div className="live-provenance">{run.provenance?.map(item=><article key={item.sourceId}><CloudCheck/><div><h3>{item.sourceName}</h3><p>{item.query||item.queryType}</p><code>{item.endpoint}</code></div><dl><dt>Retrieved</dt><dd>{new Date(item.retrievedAt).toLocaleString()}</dd><dt>Licence</dt><dd>{item.license}</dd></dl></article>)}</div>; }
 
-function Capabilities({run}) { return <div className="live-capabilities">{Object.entries(run.capabilities??{}).map(([name,available])=><div className={available?"available":"unavailable"} key={name}><span>{available?<CheckCircle/>:<ShieldWarning/>}</span><strong>{name}</strong><small>{available?"Connected":"Not configured"}</small></div>)}</div>; }
+function capabilityState(name, value) {
+  const structured = value && typeof value === "object" && !Array.isArray(value) ? value : null;
+  const explicitStatus = structured?.status ?? structured?.state;
+  let status = explicitStatus;
+  if (!present(status) && typeof value === "boolean") status = value ? "connected" : "not_configured";
+  if (!present(status) && typeof value === "string") status = value;
+  if (!present(status) && structured?.available === true) status = "available";
+  if (!present(status) && structured?.available === false) status = "unavailable";
+  if (!present(status) && structured?.configured === true) status = "configured";
+  if (!present(status) && structured?.configured === false) status = "not_configured";
+  status = status ?? "unavailable";
+  let tone = statusTone(status);
+  if (structured?.available === false || structured?.configured === false || value === false) tone = "unavailable";
+  if (structured?.available === true && tone === "unavailable" && !explicitStatus) tone = "available";
+  const reportedDetail = structured?.reason ?? structured?.message ?? structured?.detail;
+  const detail = ["string", "number"].includes(typeof reportedDetail) ? String(reportedDetail) : value === true ? "Connected" : value === false ? "Not configured" : "No additional details reported";
+  const metadata = [
+    ["Provider", structured?.provider ?? structured?.service],
+    ["Mode", structured?.mode],
+    ["Model", structured?.model],
+  ].filter(([, item])=>present(item) && typeof item !== "object");
+  return { label: structured?.label ?? humanize(name), status: humanize(status), tone, detail, metadata };
+}
+
+function Capabilities({run}) {
+  const entries = Object.entries(run.capabilities ?? {});
+  if (!entries.length) return <Empty title="Capabilities unavailable" detail="This run did not report computational capability states."/>;
+  return <div className="live-capabilities">{entries.map(([name,value])=>{
+    const capability = capabilityState(name,value);
+    return <article className={`is-${capability.tone}`} key={name}>
+      <span className="live-capability-icon">{capability.tone === "available" ? <CheckCircle/> : capability.tone === "degraded" || capability.tone === "active" ? <Warning/> : <ShieldWarning/>}</span>
+      <div className="live-capability-title"><strong>{capability.label}</strong><b>{capability.status}</b></div>
+      <p>{capability.detail}</p>
+      {capability.metadata.length > 0 && <dl>{capability.metadata.map(([label,item])=><div key={label}><dt>{label}</dt><dd>{item}</dd></div>)}</dl>}
+    </article>;
+  })}</div>;
+}
 
 function Empty({title,detail}) { return <div className="live-empty"><Database/><h3>{title}</h3><p>{detail}</p></div>; }
 
@@ -161,11 +340,23 @@ function RunView({run,onNewRun,user,onSignOut,accessToken}) {
   const [tab,setTab]=useState("Research"); const [selectedStage,setSelectedStage]=useState(run.stages?.[0]?.id);
   const score=run.association?.associationScore;
   const persistence=persistenceState(run.persistence);
+  const selectStage=(stage)=>{setSelectedStage(stage.id);const destination={rag_index:"Index",evidence:"Evidence",literature:"Literature"}[stage.id];if(destination)setTab(destination);};
+  const onTabKeyDown=(event,name)=>{
+    const current=RUN_TABS.indexOf(name);
+    let next=current;
+    if(event.key==="ArrowRight")next=(current+1)%RUN_TABS.length;
+    else if(event.key==="ArrowLeft")next=(current-1+RUN_TABS.length)%RUN_TABS.length;
+    else if(event.key==="Home")next=0;
+    else if(event.key==="End")next=RUN_TABS.length-1;
+    else return;
+    event.preventDefault();setTab(RUN_TABS[next]);event.currentTarget.parentElement?.querySelectorAll('[role="tab"]')?.[next]?.focus();
+  };
+  const panel=tab==="Research"?<Research run={run} accessToken={accessToken}/>:tab==="Index"?<RagIndex run={run}/>:tab==="Evidence"?<EvidenceTable run={run}/>:tab==="Literature"?<Literature run={run}/>:tab==="Provenance"?<Provenance run={run}/>:<Capabilities run={run}/>;
   const download=()=>{const blob=new Blob([JSON.stringify(run,null,2)],{type:"application/json"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=`axiom-run-${run.id}.json`;a.click();URL.revokeObjectURL(url);};
   return <div className="live-run">
     <header className="live-header"><div className="live-brand"><Sparkle weight="fill"/><strong>Axiom Observatory</strong><span>REAL DATA</span></div><div className="live-run-id"><code>{run.id}</code><b>{run.status?.replaceAll("_"," ")}</b></div><div><button onClick={download}><DownloadSimple/> Export run</button><button onClick={onNewRun}><ArrowClockwise/> New run</button>{user&&<button title={user.email} onClick={onSignOut}><SignOut/> Sign out</button>}</div></header>
     <aside className="live-context"><label>Target context</label><h1>{run.target?.label}</h1><p>{run.target?.name||run.target?.id}</p><code>{run.target?.id}</code><hr/><h4>Disease</h4><h2>{run.disease?.label}</h2><code>{run.disease?.id}</code><hr/><h4>Evidence boundary</h4><p>This run retrieves and organizes evidence. It does not validate causality, binding, toxicity, or efficacy.</p><div className={`live-persistence ${persistence.durable?"is-durable":""}`}>{persistence.durable?<CloudCheck/>:<Warning/>}<span><strong>{persistence.durable?"Durable Supabase run":"Ephemeral run store"}</strong><small>{persistence.durable?"The versioned run snapshot is persisted in Supabase Postgres.":"Only the run ID is retained in this browser; the server record resets on restart."}</small></span></div></aside>
-    <section className="live-workspace"><div className="live-workspace-title"><span>Evidence pipeline</span><small>Created {new Date(run.createdAt).toLocaleString()}</small></div><div className="live-stages">{run.stages?.map(stage=><StageCard key={stage.id} stage={stage} selected={stage.id===selectedStage} onClick={()=>setSelectedStage(stage.id)}/>)}</div><div className="live-inspector"><nav aria-label="Run workspace">{["Research","Evidence","Literature","Provenance","Capabilities"].map(name=><button className={tab===name?"is-active":""} onClick={()=>setTab(name)} key={name} aria-current={tab===name?"page":undefined}>{name}{name==="Evidence"&&<span>{run.evidence?.count??0}</span>}{name==="Literature"&&<span>{run.literature?.hitCount??0}</span>}</button>)}</nav><div className="live-inspector-body">{tab==="Research"?<Research run={run} accessToken={accessToken}/>:tab==="Evidence"?<EvidenceTable run={run}/>:tab==="Literature"?<Literature run={run}/>:tab==="Provenance"?<Provenance run={run}/>:<Capabilities run={run}/>}</div></div></section>
+    <section className="live-workspace"><div className="live-workspace-title"><span>Evidence pipeline</span><small>Created {new Date(run.createdAt).toLocaleString()}</small></div><div className="live-stages">{run.stages?.map(stage=><StageCard key={stage.id} stage={stage} selected={stage.id===selectedStage} onClick={()=>selectStage(stage)}/>)}</div><div className="live-inspector"><nav aria-label="Run workspace" role="tablist">{RUN_TABS.map(name=>{const slug=name.toLowerCase();return <button type="button" role="tab" id={`live-tab-${slug}`} aria-controls={`live-panel-${slug}`} aria-selected={tab===name} tabIndex={tab===name?0:-1} className={tab===name?"is-active":""} onClick={()=>setTab(name)} onKeyDown={(event)=>onTabKeyDown(event,name)} key={name}>{name}{name==="Index"&&present(run.rag?.counts?.chunks)&&<span>{run.rag.counts.chunks}</span>}{name==="Evidence"&&<span>{run.evidence?.count??0}</span>}{name==="Literature"&&<span>{run.literature?.hitCount??0}</span>}</button>;})}</nav><div className="live-inspector-body" role="tabpanel" id={`live-panel-${tab.toLowerCase()}`} aria-labelledby={`live-tab-${tab.toLowerCase()}`} tabIndex={0}>{panel}</div></div></section>
     <aside className="live-decision"><label>Scientific judge</label><section className="live-score"><span>Association score</span><strong>{score==null?"—":Number(score).toFixed(3)}</strong><p>Upstream Open Targets ranking signal. It is not a confidence probability.</p></section><section><label>Direct evidence</label><h3>{run.evidence?.count??0} records</h3><p>{run.evidence?.pageNote}</p></section><section><label>Computational blockers</label>{run.stages?.filter(stage=>stage.status==="not_configured").map(stage=><div className="live-blocker" key={stage.id}><ShieldWarning/><span><strong>{stage.label}</strong><small>{stage.reason}</small></span></div>)}</section>{run.warnings?.length>0&&<section><label>Run warnings</label>{run.warnings.map(w=><p className="live-warning" key={w}>{w}</p>)}</section>}</aside>
     <footer className="live-footer"><span><i/> Evidence sources connected</span><span>Schema {run.schemaVersion}</span><span>Predictions are unavailable until validated workers are installed.</span><span>Open-source core · v0.2</span></footer>
   </div>;

@@ -1,19 +1,20 @@
 # Supabase backend
 
-Supabase is the durable data and orchestration plane for Axiom Observatory. It owns identity, workspace authorization, run state, provenance, retrieval records, job state, and artifact metadata. Dedicated external workers own docking, molecular preparation, ADMET inference, and other CPU/GPU-heavy scientific computation.
+Supabase is the durable identity, authorization, data, and retrieval plane for Axiom Observatory. It owns workspace membership, normalized evidence runs, source provenance, documents and chunks, embeddings, retrieval audit records, job state, and artifact metadata. The current Edge Function performs bounded text embedding only. Future docking, molecular preparation, ADMET/toxicity, and other CPU/GPU-heavy scientific computation still require isolated external workers.
 
 ## Runtime modes
 
-The evidence API selects one repository for each request environment:
+The Evidence API selects one repository for each request environment:
 
-| Configuration | Repository | Durability |
-| --- | --- | --- |
-| `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` both present | Supabase Postgres | Durable |
-| Neither present | Process memory | Ephemeral |
-| Only one present | Configuration error | Request fails closed |
-| Both present but Supabase is unavailable | Persistence error | Request fails closed |
+| Configuration and runtime state | Repository and retrieval behavior |
+| --- | --- |
+| `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` present; database/function available; matching chunk vectors exist | Authenticated durable normalized ingestion plus `hybrid_rrf_v2` |
+| Supabase configured; normalized database available; embedding function unavailable or vectors do not match | Durable normalized data plus reported `postgres_fts_v1` fallback |
+| Neither server variable present | Ephemeral process-memory snapshot plus deterministic `lexical_rank_v1` |
+| Only one server variable present | Configuration error; requests fail closed |
+| Both variables present but Supabase persistence is unavailable | Persistence error; requests fail closed |
 
-There is no silent fallback after Supabase has been configured. This prevents a successful API response from falsely implying durability.
+There is no silent memory fallback after Supabase is configured. The FTS fallback is different: it operates on the same authenticated, durable, normalized Postgres chunks and is returned with an explicit retrieval mode and warning.
 
 ## Local setup
 
@@ -40,15 +41,29 @@ VITE_SUPABASE_URL=http://127.0.0.1:54321
 VITE_SUPABASE_PUBLISHABLE_KEY=your-local-anon-or-publishable-key
 ```
 
-Then run the application normally. Vite passes only the server values into its same-origin development middleware. Only the explicitly prefixed URL and publishable key enter the browser bundle; the service-role key never does.
+The same-origin Vite middleware receives the two unprefixed server variables. Only `VITE_SUPABASE_URL` and the publishable key enter the browser bundle. The service-role key must never use a `VITE_` prefix.
 
-Stop the local stack with:
+Serve all local Edge Functions in a dedicated terminal:
+
+```bash
+npx supabase functions serve
+```
+
+Do not use `--no-verify-jwt`. The `axiom-embed` request carries the signed-in user's bearer token and a server-only internal key matched against the function runtime's `SUPABASE_SERVICE_ROLE_KEY`. A browser session alone cannot call the embedding service. Start the application in another terminal:
+
+```bash
+npm run dev -- --host 0.0.0.0 --port 4174 --strictPort
+```
+
+Sign in through the browser before creating a durable run. The API validates the session before contacting upstream evidence providers, so an unauthenticated durable request cannot trigger upstream work or database mutation.
+
+Stop the function server normally, then stop the local stack with:
 
 ```bash
 npm run supabase:stop
 ```
 
-## Remote project
+## Remote deployment
 
 Authenticate and link the CLI without committing secrets:
 
@@ -57,56 +72,175 @@ npx supabase login
 npx supabase link --project-ref YOUR_PROJECT_REF
 npx supabase db push --dry-run
 npx supabase db push
+npx supabase secrets set AXIOM_EMBED_INTERNAL_KEY=YOUR_SERVER_SERVICE_KEY
+npx supabase functions deploy axiom-embed
+npx supabase functions list
 ```
 
-Configure `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` as server secrets in the hosting environment, and build the browser with `VITE_SUPABASE_URL` plus the project's publishable key. Never expose the service-role key to frontend code, logs, screenshots, or `VITE_*` variables. Replace the localhost Auth URLs in `supabase/config.toml` with the deployed origin and choose an explicit signup/invite, email-confirmation, SMTP, CAPTCHA, and password policy before public launch.
+Set `AXIOM_EMBED_INTERNAL_KEY` to the same server-only value used by the application for `SUPABASE_SERVICE_ROLE_KEY`, preferably through a protected environment file so the value does not enter shell history. Keep function JWT verification enabled; do not deploy with `--no-verify-jwt`. The function uses the Supabase Edge runtime's built-in `gte-small` session and does not require a third-party model API key.
+
+Configure the following values in the application hosting environment:
+
+- server-only `SUPABASE_URL`;
+- server-only `SUPABASE_SERVICE_ROLE_KEY`;
+- build-time/browser `VITE_SUPABASE_URL`;
+- build-time/browser `VITE_SUPABASE_PUBLISHABLE_KEY`.
+
+The service-role key is used by the server as the Supabase API key. User-owned ingestion, reads, and retrieval forward the user's bearer token as `Authorization`, preserving `auth.uid()` and workspace authorization. The trusted vector-write RPC uses service-role authorization, and the embedding request also sends the key through a private internal header checked by the Edge Function. Never expose it to frontend code, logs, screenshots, client error messages, or `VITE_*` variables.
+
+Before public access, replace localhost Auth URLs in `supabase/config.toml` with the deployed origin and choose explicit signup/invite, email-confirmation, SMTP, CAPTCHA, password, session, and account-recovery policies.
 
 ## Schema ownership
 
-Versioned SQL lives in `supabase/migrations/`. The initial schema covers:
+Versioned SQL lives in `supabase/migrations/`. The schema covers:
 
 - workspaces, memberships, and projects;
-- normalized runs, stages, sources, evidence, literature, and chunks;
-- lexical/vector retrievals and citations;
+- normalized runs, run associations, stages, sources, evidence, and literature;
+- source-linked documents, deterministic chunks, content hashes, and 384-dimensional embeddings;
+- persisted retrievals, per-result lexical/vector/fused scores, ranks, and citations;
+- compatibility run snapshots used by the API read/export contract;
 - append-only run events;
-- durable scientific jobs and artifacts;
-- compatibility run snapshots used by the current API adapter;
-- private Storage buckets and workspace-scoped access policies.
+- durable scientific job and artifact metadata;
+- private Storage buckets and workspace-scoped policies.
 
-All exposed application tables use Row Level Security. In durable mode the browser signs in with Supabase Auth, the API validates the bearer session before any upstream evidence work, and a security-definer RPC idempotently provisions a default workspace. Snapshot reads and writes are then sent to PostgREST with the user's JWT, so RLS—not possession of a run UUID—authorizes access. The service-role credential stays server-side and is used only as the API key for Auth validation and health checks in this vertical.
+All exposed application tables use Row Level Security. Tenant-owned child records use composite run/workspace relationships so a child UUID cannot cross a workspace boundary. Direct anonymous access is revoked for the normalized application data and the hybrid pipeline RPCs.
 
-The current adapter durably stores a versioned JSON run snapshot. The normalized tables are the migration target for the queued ingestion vertical; they are intentionally not described as populated until that transaction and worker path exists.
+In durable mode, the browser signs in with Supabase Auth and the API validates the bearer session. `ensure_default_workspace()` idempotently provisions the caller's workspace. Subsequent PostgREST and RPC requests use the service key as `apikey` and the user's access token as `Authorization`; RLS and security-definer functions derive ownership from the JWT, not from possession of a run UUID.
 
-## RAG migration
+## Transactional normalized ingestion
 
-The current `lexical_rank_v1` endpoint remains the deterministic baseline. The database schema prepares the next hybrid retrieval version:
+`persist_evidence_run_v1(p_payload jsonb)` is the ingestion boundary. In one Postgres transaction it:
 
-1. chunk only source text whose reuse terms permit indexing;
-2. generate embeddings with one pinned open-source biomedical model;
-3. record model name, revision, dimensions, and content hash;
-4. combine Postgres full-text rank and pgvector similarity in an authorized RPC;
-5. evaluate recall@k, MRR, duplicate rate, and citation coverage before switching the UI default.
+1. requires `auth.uid()` and resolves the caller's default workspace;
+2. validates run identity, payload types, status enums, ownership, and child-array structure;
+3. takes a run-scoped advisory transaction lock;
+4. upserts the compatibility snapshot and normalized run;
+5. writes the association, stages, sources, evidence records, literature records, documents, and chunks;
+6. preserves existing embeddings only when a chunk's content hash is unchanged;
+7. returns normalized counts and caller/workspace identity.
 
-Embeddings generated by different models must not be compared in the same index without an explicit migration.
+The payload builder retains source-native identifiers, source URLs, citations, licences when known, provenance metadata, and SHA-256 content hashes. Open Targets scores are stored with explicit “ranking, not confidence” semantics. Europe PMC open-access status is not treated as an article-level reuse licence.
+
+This transaction makes normalized evidence durable before embedding begins. Derived child UUIDs are stable within a run, so the same payload can be retried without inventing duplicate records. Embedding is a subsequent bounded phase, so an inference failure can fall back to FTS without rolling back acquired source records. Immediate transient embedding calls receive a bounded three-attempt retry; durable queued recovery is not yet complete.
+
+## Embedding function
+
+`supabase/functions/axiom-embed/index.ts` implements a narrow authenticated batch contract:
+
+| Constraint | Value |
+| --- | --- |
+| Model | `Supabase/gte-small` |
+| Runtime revision contract | `supabase-edge-runtime-managed` |
+| Dimensions | `384` |
+| Pooling/normalization | Mean pool, normalized vector |
+| Batch size | 1–6 unique IDs |
+| Input size | 3–2,000 characters after trimming |
+| Method | Authenticated `POST` only |
+
+The `Supabase.ai.Session("gte-small")` is module-scoped so warm function instances can reuse it. The function requires both gateway bearer authentication and the Axiom server's internal key, then rejects malformed batches, duplicate IDs, invalid dimensions, non-finite values, and vectors outside its normalization tolerance. Responses are `no-store`. Runtime failures return bounded error messages and do not echo source text.
+
+The server-side embedding client adds a 25-second per-attempt timeout, a maximum of three attempts for network, `429`, and selected `5xx` failures, and validates model, revision, dimensions, normalization metadata, IDs, vector length, finite values, and approximate magnitude. It forwards the user's bearer token for the function gateway and keeps the API/internal key server-side.
+
+The application processes at most 500 selected chunk rows per run and intentionally rejects a result set that exceeds that safety cap. Application embedding batches contain at most six chunks. These are POC resource bounds, not throughput claims.
+
+## Applying embeddings
+
+`apply_chunk_embeddings_v1` accepts one trusted server batch and revalidates the boundary inside Postgres. Execute permission is revoked from `authenticated` and granted only to `service_role`. It verifies:
+
+- the service-role caller and run-derived workspace;
+- the exact `Supabase/gte-small` and `supabase-edge-runtime-managed` contract;
+- unique UUID chunk identities belonging to the run;
+- exactly 384 numeric, finite, nonzero values per vector with `|norm²−1| ≤ 0.002`;
+- model/revision consistency across the completed run index.
+
+The function takes the same run-scoped advisory lock as ingestion. It updates `rag_index` progress and will not mark the stage complete until every run chunk has a matching model/revision embedding. The schema requires vector, model, and revision provenance to be either all null or all present.
+
+The hybrid migration intentionally clears any earlier experimental embeddings before changing vector dimensions to 384. Embeddings from different models or revisions must not be compared without an explicit re-indexing migration.
+
+## Hybrid retrieval and lexical fallback
+
+`execute_run_retrieval_v2` is the only application retrieval RPC. The earlier generic `hybrid_search_document_chunks` signature is retained as a service-role-only compatibility tombstone and must not be used by application clients.
+
+For each authorized run query, `execute_run_retrieval_v2`:
+
+1. validates query length, `topK`, RRF configuration, and the all-or-none query-embedding provenance tuple;
+2. scopes eligible chunks to the caller-visible run;
+3. computes Postgres English FTS candidates;
+4. computes inner-product semantic candidates only when chunk model and revision exactly match the query embedding;
+5. combines the ranks with reciprocal rank fusion (`rrf_k = 60`);
+6. persists the retrieval and ranked result rows;
+7. returns source URLs, identifiers, citations, provenance, score meanings, warnings, and citation coverage.
+
+The database uses exact semantic ranking after the run filter at this milestone. A partial HNSW index with the inner-product operator class exists for future/vector-specific query plans, but the current small-run RPC is designed to avoid filtered approximate-nearest-neighbor under-return.
+
+The response mode is authoritative:
+
+- `hybrid_rrf_v2` means matching FTS and pgvector candidates were fused;
+- `postgres_fts_v1` means the durable query used normalized FTS because query embedding failed or compatible vectors were unavailable;
+- `lexical_rank_v1` never comes from this RPC; it is the separate process-memory baseline.
+
+All score metadata states that lexical rank, vector similarity, and RRF are not probability or confidence. The citation audit measures whether returned records carry source identifiers. It does not validate source truth, claim entailment, causal mechanism, efficacy, toxicity, or clinical relevance. Retrieval responses remain `generated: false`.
+
+## Agent workflow contract
+
+The API and UI expose a concise workflow trace:
+
+1. Query planner;
+2. Hybrid retriever or an explicitly labeled lexical retriever;
+3. Citation guard.
+
+This is a deterministic registered-tool flow, not a free-form autonomous agent. The UI also exposes index counts, model/revision/dimensions, chunking policy, fallback reason, score breakdowns, citation coverage, and source links. Missing metadata is displayed as unavailable rather than inferred.
+
+No synthesizer is configured. A completed citation guard does not create a scientific claim.
 
 ## Scientific jobs
 
-Supabase Queues and the `jobs` table prepare durable dispatch and user-visible state. Queue consumers are not implemented in this slice. When enabled, scientific jobs will run in external containers:
+Supabase Queues and the `jobs` table prepare durable dispatch and user-visible state, but queue consumers are not implemented in this milestone. Future scientific jobs will run in isolated external containers:
 
 ```text
 API → Postgres transaction → queue message → external worker
-    → private Storage artifacts → normalized result + provenance
+    → private Storage artifacts → normalized prediction + provenance
 ```
 
-Workers must be idempotent, lease jobs, heartbeat, checkpoint, record image/tool/model versions, and complete the queue message only after outputs are durably committed. Edge Functions are limited orchestration surfaces and are not used to execute AutoDock Vina, RDKit, ADMET-AI, or GPU inference.
+Workers must be idempotent, lease jobs, heartbeat, checkpoint, record image/tool/model versions, and complete a queue message only after outputs are durably committed. The `axiom-embed` Edge Function is not a template for executing AutoDock Vina, RDKit, ADMET-AI, or GPU-heavy scientific workloads.
+
+Docking, ADMET/toxicity, retrosynthesis, scientific-answer generation, wet-lab validation, and clinical validation remain not configured.
 
 ## Validation
 
+Run the network-independent tests and production build:
+
 ```bash
 npm test
-npm run supabase:lint
 npm run build
 npm run test:sites
 ```
 
-`supabase:lint` and a full migration replay require the local Docker-backed stack. Unit tests use mocked Supabase REST responses and remain network-independent.
+The suite covers:
+
+- public upstream search/evidence normalization and score semantics;
+- ephemeral lexical retrieval and `generated: false`;
+- authenticated durable snapshots, transactional normalized ingestion, hybrid retrieval fixtures, RLS identity propagation, and fail-closed errors;
+- deterministic chunk bounds, hashes, identifiers, citations, and provenance;
+- embedding-client authentication, timeouts, dimension/revision drift, and vector validation;
+- the Edge Function's authenticated, bounded, normalized 384-dimensional source contract;
+- schema, RLS, composite tenancy, vector/RPC, and static hosting invariants.
+
+With the local Docker-backed stack running, also execute:
+
+```bash
+npm run supabase:lint
+```
+
+Static and mocked tests do not replace a remote integration pass. Before production, test concurrent users in different workspaces, migration replay, Edge deployment, Auth expiry/refresh, embedding failure and recovery, FTS fallback, model drift, citation coverage, load bounds, and backup/restore.
+
+## Scientific and operational limitations
+
+- Only normalized evidence records and Europe PMC metadata/abstracts are indexed; licensed full-text ingestion is not implemented.
+- `gte-small` is a retrieval baseline, not a biomedical reasoning, safety, toxicity, or efficacy model.
+- The Supabase-managed revision label is not an immutable upstream model commit.
+- Citation presence does not establish claim support or scientific validity.
+- Cross-run retrieval, reranking, generation, claim entailment, and human-review workflows are absent.
+- Retry queues, rate limits, production observability, capacity tests, drift monitoring, and disaster recovery are incomplete.
+- Health checks probe durable Postgres but do not execute the Edge model; run/index and retrieval responses provide the authoritative embedding capability state.
+- Docking, molecular preparation, ADMET/toxicity, retrosynthesis, wet-lab validation, and clinical translation are unavailable.

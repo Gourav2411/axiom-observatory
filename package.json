@@ -1,6 +1,6 @@
 {
   "name": "axiom-observatory",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -11,6 +11,7 @@
     "build": "vite build && node scripts/prepare-sites-build.mjs",
     "preview": "vite preview",
     "test": "node --test tests/*.test.mjs",
+    "test:remote-rag": "node --env-file=.env.local scripts/verify-remote-rag.mjs",
     "test:sites": "node --test tests/sites-worker.test.mjs",
     "supabase:start": "supabase start",
     "supabase:stop": "supabase stop",
