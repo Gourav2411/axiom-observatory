@@ -54,6 +54,7 @@ test("Supabase schema prepares hybrid retrieval, queues, and private artifacts",
   assert.match(sql, /embedding extensions\.vector\(768\)/i);
   assert.match(sql, /using hnsw/i);
   assert.match(sql, /hybrid_search_document_chunks/i);
+  assert.match(sql, /operator\(extensions\.<=>\)/i);
   assert.match(sql, /perform pgmq\.create\('scientific_compute'\)/i);
   assert.match(sql, /'run-artifacts', 'run-artifacts', false/i);
   assert.match(sql, /create policy axiom_storage_select_member/i);

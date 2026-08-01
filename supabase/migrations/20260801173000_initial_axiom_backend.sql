@@ -610,15 +610,17 @@ as $$
   semantic as (
     select
       dc.id,
-      (1 - (dc.embedding <=> query_embedding))::double precision as score,
-      row_number() over (order by dc.embedding <=> query_embedding, dc.id) as rank_position
+      (1 - (dc.embedding operator(extensions.<=>) query_embedding))::double precision as score,
+      row_number() over (
+        order by dc.embedding operator(extensions.<=>) query_embedding, dc.id
+      ) as rank_position
     from public.document_chunks dc
     where dc.workspace_id = target_workspace_id
       and (target_run_id is null or dc.run_id = target_run_id)
       and public.is_workspace_member(dc.workspace_id)
       and dc.embedding is not null
       and query_embedding is not null
-    order by dc.embedding <=> query_embedding, dc.id
+    order by dc.embedding operator(extensions.<=>) query_embedding, dc.id
     limit greatest(1, least(match_count * 4, 200))
   ),
   fused as (
