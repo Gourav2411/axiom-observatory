@@ -1,0 +1,30 @@
+.workspace {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 100px);
+}
+
+.workspace-title,
+.lanes {
+  flex: 0 0 auto;
+}
+
+.inspection {
+  flex: 1;
+  min-height: 520px;
+}
+
+.inspection-grid {
+  height: calc(100% - 40px);
+  min-height: 520px;
+}
+
+.decision-panel {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 100px);
+}
+
+.decision-panel .summary {
+  flex: 1;
+}
