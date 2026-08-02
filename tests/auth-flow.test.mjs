@@ -4,18 +4,25 @@ import test from "node:test";
 import {
   AUTH_REDIRECT_PATHS,
   MIN_PASSWORD_LENGTH,
+  PASSWORD_RECOVERY_SESSION_KEY,
+  PASSWORD_RECOVERY_SESSION_TTL_MS,
   authErrorMessage,
   authIntentFromRedirectType,
   authRedirectUrl,
   authSuccessMessage,
   clearAuthCallbackLocation,
   exchangeAuthCallback,
+  forgetPasswordRecovery,
   googleSignIn,
+  hasPasswordRecoverySession,
   isDuplicateSignupError,
   isMissingMagicAccountError,
+  isPasswordRecoveryRoute,
   passwordSignIn,
   passwordSignUp,
+  passwordRecoveryStateForAuthEvent,
   readAuthCallback,
+  rememberPasswordRecovery,
   sendMagicLink,
   sendPasswordReset,
   updatePassword,
@@ -42,6 +49,16 @@ function createAuthMock(results = {}) {
     },
   ]));
   return { client: { auth }, calls };
+}
+
+function createStorageMock(initial = {}) {
+  const values = new Map(Object.entries(initial));
+  return {
+    getItem(key) { return values.has(key) ? values.get(key) : null; },
+    setItem(key, value) { values.set(key, String(value)); },
+    removeItem(key) { values.delete(key); },
+    values,
+  };
 }
 
 test("auth redirects use fixed same-origin routes and discard input paths, queries, and fragments", () => {
@@ -180,7 +197,7 @@ test("callback parsing returns bounded errors from query or fragment parameters"
   assert.deepEqual(readAuthCallback(), { intent: null, error: null, isAuthRoute: false, hasAuthResponse: false });
 });
 
-test("callback cleanup replaces auth URLs with a token-free root path", () => {
+test("callback cleanup removes credentials while preserving only the intended safe route", () => {
   const calls = [];
   const history = {
     state: { app: "state" },
@@ -194,8 +211,19 @@ test("callback cleanup replaces auth URLs with a token-free root path", () => {
     },
   });
 
-  assert.deepEqual(calls, [[history.state, "", "/"]]);
+  assert.deepEqual(calls, [[history.state, "", "/reset-password"]]);
   assert.doesNotMatch(JSON.stringify(calls), /ACCESS_SECRET|REFRESH_SECRET/);
+
+  calls.length = 0;
+  clearAuthCallbackLocation({
+    history,
+    location: {
+      href: "https://axiom.example.test/reset-password?code=AUTH_CODE#access_token=ACCESS_SECRET",
+    },
+    preserveRecoveryRoute: false,
+  });
+  assert.deepEqual(calls, [[history.state, "", "/"]]);
+  assert.doesNotMatch(JSON.stringify(calls), /AUTH_CODE|ACCESS_SECRET/);
 
   calls.length = 0;
   clearAuthCallbackLocation({
@@ -206,13 +234,78 @@ test("callback cleanup replaces auth URLs with a token-free root path", () => {
 });
 
 test("callback exchange requires an exact app route and maps Supabase redirect types", async () => {
-  const {client}=createAuthMock();
+  const {client,calls}=createAuthMock();
   assert.throws(()=>exchangeAuthCallback(client,{url:"https://axiom.example.test/not-auth?code=SECRET"}),/callback code is unavailable/);
   assert.throws(()=>exchangeAuthCallback(client,{url:"https://axiom.example.test/auth/callback"}),/callback code is unavailable/);
+  assert.throws(()=>exchangeAuthCallback(client,{url:"https://axiom.example.test/reset-password?code=SECRET&sb_flow_id=bad!"}),/callback flow is invalid/);
+  await exchangeAuthCallback(client,{url:"https://axiom.example.test/reset-password?code=SECRET&sb_flow_id=flow_12345678"});
+  assert.deepEqual(calls.exchangeCodeForSession.at(-1),["SECRET",{flowId:"flow_12345678"}]);
   assert.equal(authIntentFromRedirectType("recovery"),"recovery");
   assert.equal(authIntentFromRedirectType("signup"),"confirmation");
   assert.equal(authIntentFromRedirectType("magiclink"),"magic");
   assert.equal(authIntentFromRedirectType(null),"callback");
+});
+
+test("password recovery route and short-lived session latch survive a reload safely", () => {
+  const now = 1_800_000_000_000;
+  const session = { user: { id: "user-123" } };
+  const otherSession = { user: { id: "user-456" } };
+  const storage = createStorageMock();
+
+  assert.equal(isPasswordRecoveryRoute("https://axiom.example.test/reset-password?code=SECRET"), true);
+  assert.equal(isPasswordRecoveryRoute("https://axiom.example.test/auth/callback?code=SECRET"), false);
+  assert.equal(rememberPasswordRecovery(session, { storage, now }), true);
+  assert.equal(hasPasswordRecoverySession(session, { storage, now: now + 1_000 }), true);
+
+  const stored = JSON.parse(storage.getItem(PASSWORD_RECOVERY_SESSION_KEY));
+  assert.deepEqual(stored, {
+    userId: "user-123",
+    expiresAt: now + PASSWORD_RECOVERY_SESSION_TTL_MS,
+  });
+  assert.doesNotMatch(JSON.stringify(stored), /access_token|refresh_token/i);
+
+  assert.equal(hasPasswordRecoverySession(otherSession, { storage, now: now + 1_000 }), false);
+  assert.equal(storage.getItem(PASSWORD_RECOVERY_SESSION_KEY), null);
+
+  rememberPasswordRecovery(session, { storage, now });
+  assert.equal(hasPasswordRecoverySession(session, {
+    storage,
+    now: now + PASSWORD_RECOVERY_SESSION_TTL_MS,
+  }), false);
+  assert.equal(forgetPasswordRecovery({ storage }), true);
+  assert.equal(storage.getItem(PASSWORD_RECOVERY_SESSION_KEY), null);
+});
+
+test("sign-out clears recovery state so a later sign-in cannot reuse the latch", () => {
+  const now = 1_800_000_000_000;
+  const session = { user: { id: "user-123" } };
+  const storage = createStorageMock();
+
+  assert.equal(passwordRecoveryStateForAuthEvent({
+    event: "PASSWORD_RECOVERY",
+    session,
+    recoveryRoute: true,
+    storage,
+    now,
+  }), true);
+  assert.notEqual(storage.getItem(PASSWORD_RECOVERY_SESSION_KEY), null);
+
+  assert.equal(passwordRecoveryStateForAuthEvent({
+    event: "SIGNED_OUT",
+    session: null,
+    recoveryRoute: true,
+    storage,
+    now: now + 1_000,
+  }), false);
+  assert.equal(storage.getItem(PASSWORD_RECOVERY_SESSION_KEY), null);
+
+  assert.equal(passwordRecoveryStateForAuthEvent({
+    event: "SIGNED_IN",
+    session,
+    recoveryRoute: true,
+    storage,
+    now: now + 2_000,
+  }), null);
 });
 
 test("auth errors are mapped to safe user-facing copy without leaking unknown details", () => {

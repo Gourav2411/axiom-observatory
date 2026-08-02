@@ -1,4 +1,7 @@
 const MIN_PASSWORD_LENGTH = 10;
+const PASSWORD_RECOVERY_SESSION_KEY = "axiom:password-recovery";
+const PASSWORD_RECOVERY_SESSION_TTL_MS = 60 * 60 * 1000;
+const PKCE_FLOW_ID_PATTERN = /^[a-zA-Z0-9_-]{8,64}$/;
 
 const AUTH_REDIRECT_PATHS = Object.freeze({
   confirmation: "/auth/callback",
@@ -61,6 +64,11 @@ function readAuthCallback(url = globalThis.location?.href) {
   };
 }
 
+function isPasswordRecoveryRoute(url = globalThis.location?.href) {
+  if (typeof url !== "string" || !url) return false;
+  return new URL(url, "http://localhost").pathname === AUTH_REDIRECT_PATHS.recovery;
+}
+
 function authIntentFromRedirectType(redirectType) {
   if (redirectType === "recovery") return "recovery";
   if (redirectType === "signup") return "confirmation";
@@ -71,11 +79,94 @@ function authIntentFromRedirectType(redirectType) {
 function clearAuthCallbackLocation({
   history = globalThis.history,
   location = globalThis.location,
+  preserveRecoveryRoute = true,
 } = {}) {
   if (!history?.replaceState || !location?.href) return;
   const state = readAuthCallback(location.href);
   if (!state.isAuthRoute && !state.error) return;
-  history.replaceState(history.state, "", "/");
+  const destination = preserveRecoveryRoute && isPasswordRecoveryRoute(location.href)
+    ? AUTH_REDIRECT_PATHS.recovery
+    : "/";
+  history.replaceState(history.state, "", destination);
+}
+
+function recoverySessionStorage(storage = globalThis.sessionStorage) {
+  return storage && typeof storage.getItem === "function"
+    && typeof storage.setItem === "function"
+    && typeof storage.removeItem === "function"
+    ? storage
+    : null;
+}
+
+function rememberPasswordRecovery(session, {
+  storage = globalThis.sessionStorage,
+  now = Date.now(),
+} = {}) {
+  const userId = session?.user?.id;
+  const target = recoverySessionStorage(storage);
+  if (!target || typeof userId !== "string" || !userId) return false;
+  try {
+    target.setItem(PASSWORD_RECOVERY_SESSION_KEY, JSON.stringify({
+      userId,
+      expiresAt: now + PASSWORD_RECOVERY_SESSION_TTL_MS,
+    }));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function hasPasswordRecoverySession(session, {
+  storage = globalThis.sessionStorage,
+  now = Date.now(),
+} = {}) {
+  const userId = session?.user?.id;
+  const target = recoverySessionStorage(storage);
+  if (!target || typeof userId !== "string" || !userId) return false;
+  try {
+    const value = JSON.parse(target.getItem(PASSWORD_RECOVERY_SESSION_KEY) ?? "null");
+    const valid = value?.userId === userId
+      && Number.isFinite(value?.expiresAt)
+      && value.expiresAt > now
+      && value.expiresAt <= now + PASSWORD_RECOVERY_SESSION_TTL_MS;
+    if (!valid) target.removeItem(PASSWORD_RECOVERY_SESSION_KEY);
+    return valid;
+  } catch {
+    try { target.removeItem(PASSWORD_RECOVERY_SESSION_KEY); } catch { /* Ignore blocked storage cleanup. */ }
+    return false;
+  }
+}
+
+function forgetPasswordRecovery({ storage = globalThis.sessionStorage } = {}) {
+  const target = recoverySessionStorage(storage);
+  if (!target) return false;
+  try {
+    target.removeItem(PASSWORD_RECOVERY_SESSION_KEY);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function passwordRecoveryStateForAuthEvent({
+  event,
+  session,
+  recoveryRoute = false,
+  callbackExchangePending = false,
+  storage = globalThis.sessionStorage,
+  now = Date.now(),
+}) {
+  if (event === "SIGNED_OUT") {
+    forgetPasswordRecovery({ storage });
+    return false;
+  }
+  if (event === "PASSWORD_RECOVERY") {
+    rememberPasswordRecovery(session, { storage, now });
+    return Boolean(session);
+  }
+  if (!callbackExchangePending && recoveryRoute
+    && hasPasswordRecoverySession(session, { storage, now })) return true;
+  return null;
 }
 
 function authErrorMessage(error) {
@@ -187,7 +278,14 @@ function exchangeAuthCallback(client, { url = globalThis.location?.href } = {}) 
   if (!["/auth/callback", "/reset-password"].includes(parsed.pathname) || !code) {
     throw new Error("The authentication callback code is unavailable.");
   }
-  return authResult(requireAuthClient(client).exchangeCodeForSession(code));
+  const flowId = parsed.searchParams.get("sb_flow_id");
+  if (flowId && !PKCE_FLOW_ID_PATTERN.test(flowId)) {
+    throw new Error("The authentication callback flow is invalid.");
+  }
+  const auth = requireAuthClient(client);
+  return authResult(flowId
+    ? auth.exchangeCodeForSession(code, { flowId })
+    : auth.exchangeCodeForSession(code));
 }
 
 function updatePassword(client, password) {
@@ -205,18 +303,25 @@ function validateNewPassword(password, confirmation) {
 export {
   AUTH_REDIRECT_PATHS,
   MIN_PASSWORD_LENGTH,
+  PASSWORD_RECOVERY_SESSION_KEY,
+  PASSWORD_RECOVERY_SESSION_TTL_MS,
   authErrorMessage,
   authIntentFromRedirectType,
   authRedirectUrl,
   authSuccessMessage,
   clearAuthCallbackLocation,
   exchangeAuthCallback,
+  forgetPasswordRecovery,
   googleSignIn,
+  hasPasswordRecoverySession,
+  isPasswordRecoveryRoute,
   isDuplicateSignupError,
   isMissingMagicAccountError,
   passwordSignIn,
   passwordSignUp,
+  passwordRecoveryStateForAuthEvent,
   readAuthCallback,
+  rememberPasswordRecovery,
   sendMagicLink,
   sendPasswordReset,
   updatePassword,

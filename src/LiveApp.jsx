@@ -8,8 +8,9 @@ import { api } from "./api.js";
 import {
   authErrorMessage, authIntentFromRedirectType, authSuccessMessage,
   clearAuthCallbackLocation, exchangeAuthCallback, googleSignIn, passwordSignIn,
-  isDuplicateSignupError, isMissingMagicAccountError, passwordSignUp,
-  readAuthCallback, sendMagicLink,
+  forgetPasswordRecovery, hasPasswordRecoverySession, isDuplicateSignupError,
+  isMissingMagicAccountError, isPasswordRecoveryRoute, passwordSignUp,
+  passwordRecoveryStateForAuthEvent, readAuthCallback, rememberPasswordRecovery, sendMagicLink,
   sendPasswordReset, updatePassword, validateNewPassword,
 } from "./auth-flow.js";
 import { supabase, supabaseBrowserConfigured, supabaseGoogleConfigured } from "./supabase.js";
@@ -25,6 +26,7 @@ const INDEX_COUNTS = [
   ["embeddedChunks", "Embedded chunks"],
 ];
 const INITIAL_AUTH_CALLBACK = readAuthCallback();
+const INITIAL_PASSWORD_RECOVERY_ROUTE = isPasswordRecoveryRoute();
 
 function savedRunId() {
   try {
@@ -117,7 +119,7 @@ const AUTH_MODE_COPY = {
   },
   reset: {
     title: "Reset your password.",
-    description: "We will email a secure recovery link. Open it in this same browser to continue.",
+    description: "We will email a secure recovery link. Open it in this same browser and browser profile—not an email app preview—to continue.",
     submit: "Send reset link",
     busy: "Sending reset link…",
   },
@@ -150,7 +152,7 @@ function AuthPanel({ initialMode = "sign-in", initialError = "", onLeaveCallback
       }
       if(mode==="reset"){
         await sendPasswordReset(supabase,{email});
-        setMessage("If an account exists, a reset link is on its way. Open it in this same browser.");
+        setMessage("If an account exists, a reset link is on its way. Open it in this same browser and browser profile.");
       }
     } catch(authError) {
       const absentMagicAccount=mode==="magic"&&isMissingMagicAccountError(authError);
@@ -479,8 +481,9 @@ export function LiveApp(){
   const [authNotice,setAuthNotice]=useState("");
   const [authIssue,setAuthIssue]=useState("");
   const [authCallback,setAuthCallback]=useState(INITIAL_AUTH_CALLBACK);
+  const callbackExchangeRef=useRef(null);
   const callbackError=authCallback.error?authErrorMessage(authCallback.error):"";
-  const clearAuthCallback=()=>{clearAuthCallbackLocation();setAuthCallback({intent:null,error:null,isAuthRoute:false,hasAuthResponse:false});};
+  const clearAuthCallback=()=>{forgetPasswordRecovery();clearAuthCallbackLocation({preserveRecoveryRoute:false});setAuthCallback({intent:null,error:null,isAuthRoute:false,hasAuthResponse:false});};
   useEffect(()=>{
     let active=true;
     api.health().then(value=>active&&setHealth(value)).catch(e=>{if(active){setError(e.message);setRestoring(false);}});
@@ -491,31 +494,33 @@ export function LiveApp(){
     let active=true; let callbackExchangePending=authCallback.hasAuthResponse&&!authCallback.error;
     const {data:{subscription}}=supabase.auth.onAuthStateChange((event,session)=>{
       if(!active)return;
-      const verifiedRecovery=event==="PASSWORD_RECOVERY";
       setAuth({loading:callbackExchangePending,session,user:session?.user??null});
-      if(verifiedRecovery)setRecovery(true);
+      const recoveryState=passwordRecoveryStateForAuthEvent({event,session,recoveryRoute:INITIAL_PASSWORD_RECOVERY_ROUTE,callbackExchangePending});
+      if(recoveryState!==null)setRecovery(recoveryState);
     });
     const initialize=async()=>{
       if(callbackExchangePending){
         try {
-          const exchange=exchangeAuthCallback(supabase);
-          clearAuthCallbackLocation();
-          const data=await exchange;
+          if(!callbackExchangeRef.current)callbackExchangeRef.current=exchangeAuthCallback(supabase);
+          const data=await callbackExchangeRef.current;
           if(!active)return;
           callbackExchangePending=false;
           const intent=authIntentFromRedirectType(data.redirectType);
           if(authCallback.intent==="recovery"&&intent!=="recovery"){
+            forgetPasswordRecovery();
             setRecovery(false);
             setAuthCallback(current=>({...current,hasAuthResponse:false,error:{code:"invalid_recovery_callback",message:"This link did not create a recovery session."}}));
           }else{
-            if(intent==="recovery")setRecovery(true);
+            if(intent==="recovery"){rememberPasswordRecovery(data.session);setRecovery(true);}
             setAuthCallback(current=>({...current,intent,error:null,hasAuthResponse:false}));
           }
+          clearAuthCallbackLocation();
           setAuth({loading:false,session:data.session,user:data.session?.user??null});
         }catch(exchangeError){
           callbackExchangePending=false;clearAuthCallbackLocation();
           const {data}=await supabase.auth.getSession();
           if(!active)return;
+          forgetPasswordRecovery();
           setRecovery(false);
           setAuth({loading:false,session:data.session,user:data.session?.user??null});
           setAuthCallback(current=>({...current,hasAuthResponse:false,error:{code:exchangeError?.code??"callback_exchange_failed",message:exchangeError?.message??"Authentication could not be completed."}}));
@@ -523,7 +528,10 @@ export function LiveApp(){
         return;
       }
       const {data}=await supabase.auth.getSession();
-      if(active)setAuth({loading:false,session:data.session,user:data.session?.user??null});
+      if(active){
+        if(INITIAL_PASSWORD_RECOVERY_ROUTE&&hasPasswordRecoverySession(data.session))setRecovery(true);
+        setAuth({loading:false,session:data.session,user:data.session?.user??null});
+      }
     };
     initialize().catch(()=>active&&setAuth({loading:false,session:null,user:null}));
     return()=>{active=false;subscription.unsubscribe();};
