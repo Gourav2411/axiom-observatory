@@ -45,7 +45,12 @@ function createAuthMock(results = {}) {
     method,
     async (...args) => {
       calls[method].push(args);
-      return results[method] ?? { data: { operation: method }, error: null };
+      return results[method] ?? {
+        data: method === "exchangeCodeForSession"
+          ? { operation: method, session: { user: { id: "user-123" } } }
+          : { operation: method },
+        error: null,
+      };
     },
   ]));
   return { client: { auth }, calls };
@@ -131,7 +136,7 @@ test("auth action helpers call Supabase with exact normalized payloads", async (
 
   assert.deepEqual(await exchangeAuthCallback(client, {
     url: "https://axiom.example.test/auth/callback?code=AUTH_CODE",
-  }), { operation: "exchangeCodeForSession" });
+  }), { operation: "exchangeCodeForSession", session: { user: { id: "user-123" } } });
   assert.deepEqual(calls.exchangeCodeForSession, [["AUTH_CODE"]]);
 });
 
@@ -163,6 +168,10 @@ test("callback parsing recognizes supported intents without returning credential
   assert.deepEqual(
     readAuthCallback("https://axiom.example.test/auth/callback?intent=google&code=AUTH_CODE&token_hash=TOKEN_HASH"),
     { intent: "google", error: null, isAuthRoute: true, hasAuthResponse: true },
+  );
+  assert.deepEqual(
+    readAuthCallback("https://axiom.example.test/?code=FALLBACK_CODE"),
+    { intent: "callback", error: null, isAuthRoute: true, hasAuthResponse: true },
   );
   assert.deepEqual(
     readAuthCallback("https://axiom.example.test/not-auth?intent=magic"),
@@ -228,6 +237,14 @@ test("callback cleanup removes credentials while preserving only the intended sa
   calls.length = 0;
   clearAuthCallbackLocation({
     history,
+    location: { href: "https://axiom.example.test/?code=FALLBACK_CODE&sb_flow_id=flow_12345678" },
+  });
+  assert.deepEqual(calls, [[history.state, "", "/"]]);
+  assert.doesNotMatch(JSON.stringify(calls), /FALLBACK_CODE|flow_12345678/);
+
+  calls.length = 0;
+  clearAuthCallbackLocation({
+    history,
     location: { href: "https://axiom.example.test/workspace?tab=evidence" },
   });
   assert.deepEqual(calls, []);
@@ -235,15 +252,27 @@ test("callback cleanup removes credentials while preserving only the intended sa
 
 test("callback exchange requires an exact app route and maps Supabase redirect types", async () => {
   const {client,calls}=createAuthMock();
-  assert.throws(()=>exchangeAuthCallback(client,{url:"https://axiom.example.test/not-auth?code=SECRET"}),/callback code is unavailable/);
-  assert.throws(()=>exchangeAuthCallback(client,{url:"https://axiom.example.test/auth/callback"}),/callback code is unavailable/);
-  assert.throws(()=>exchangeAuthCallback(client,{url:"https://axiom.example.test/reset-password?code=SECRET&sb_flow_id=bad!"}),/callback flow is invalid/);
+  await assert.rejects(exchangeAuthCallback(client,{url:"https://axiom.example.test/not-auth?code=SECRET"}),/callback code is unavailable/);
+  await assert.rejects(exchangeAuthCallback(client,{url:"https://axiom.example.test/auth/callback"}),/callback code is unavailable/);
+  await assert.rejects(exchangeAuthCallback(client,{url:"https://axiom.example.test/reset-password?code=SECRET&sb_flow_id=bad!"}),/callback flow is invalid/);
+  await exchangeAuthCallback(client,{url:"https://axiom.example.test/?code=FALLBACK_SECRET&sb_flow_id=flow_87654321"});
+  assert.deepEqual(calls.exchangeCodeForSession.at(-1),["FALLBACK_SECRET",{flowId:"flow_87654321"}]);
   await exchangeAuthCallback(client,{url:"https://axiom.example.test/reset-password?code=SECRET&sb_flow_id=flow_12345678"});
   assert.deepEqual(calls.exchangeCodeForSession.at(-1),["SECRET",{flowId:"flow_12345678"}]);
   assert.equal(authIntentFromRedirectType("recovery"),"recovery");
   assert.equal(authIntentFromRedirectType("signup"),"confirmation");
   assert.equal(authIntentFromRedirectType("magiclink"),"magic");
   assert.equal(authIntentFromRedirectType(null),"callback");
+});
+
+test("callback exchange rejects a response that does not create a session", async () => {
+  const {client}=createAuthMock({
+    exchangeCodeForSession: {data:{session:null},error:null},
+  });
+  await assert.rejects(
+    exchangeAuthCallback(client,{url:"https://axiom.example.test/auth/callback?code=SECRET"}),
+    (error)=>error.code==="session_not_created",
+  );
 });
 
 test("password recovery route and short-lived session latch survive a reload safely", () => {

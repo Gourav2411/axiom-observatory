@@ -35,11 +35,17 @@ function readAuthCallback(url = globalThis.location?.href) {
   }
   const parsed = new URL(url, "http://localhost");
   const fragment = new URLSearchParams(parsed.hash.replace(/^#/, ""));
+  const hasCode = parsed.searchParams.has("code");
+  const isCallbackRoute = parsed.pathname === "/auth/callback";
+  const isRecoveryRoute = parsed.pathname === "/reset-password";
+  // Supabase falls back to the configured Site URL when an explicit redirect
+  // cannot be matched. Treat only a coded root URL as that safe fallback.
+  const isSiteUrlFallback = parsed.pathname === "/" && hasCode;
   const queryIntent = parsed.searchParams.get("intent");
   const callbackType = parsed.searchParams.get("type") ?? fragment.get("type");
-  const intent = parsed.pathname === "/reset-password"
+  const intent = isRecoveryRoute
     ? "recovery"
-    : parsed.pathname === "/auth/callback"
+    : isCallbackRoute || isSiteUrlFallback
       ? AUTH_INTENTS.has(queryIntent)
         ? queryIntent
         : callbackType === "signup"
@@ -59,8 +65,8 @@ function readAuthCallback(url = globalThis.location?.href) {
     error: errorCode || errorDescription
       ? { code: errorCode ?? "auth_callback_failed", message: errorDescription ?? "Authentication could not be completed." }
       : null,
-    isAuthRoute: parsed.pathname === "/auth/callback" || parsed.pathname === "/reset-password",
-    hasAuthResponse: parsed.searchParams.has("code"),
+    isAuthRoute: isCallbackRoute || isRecoveryRoute || isSiteUrlFallback,
+    hasAuthResponse: hasCode,
   };
 }
 
@@ -272,10 +278,10 @@ function googleSignIn(client, { origin }) {
   }));
 }
 
-function exchangeAuthCallback(client, { url = globalThis.location?.href } = {}) {
+async function exchangeAuthCallback(client, { url = globalThis.location?.href } = {}) {
   const parsed = new URL(url ?? "", "http://localhost");
   const code = parsed.searchParams.get("code");
-  if (!["/auth/callback", "/reset-password"].includes(parsed.pathname) || !code) {
+  if (!["/", "/auth/callback", "/reset-password"].includes(parsed.pathname) || !code) {
     throw new Error("The authentication callback code is unavailable.");
   }
   const flowId = parsed.searchParams.get("sb_flow_id");
@@ -283,9 +289,15 @@ function exchangeAuthCallback(client, { url = globalThis.location?.href } = {}) 
     throw new Error("The authentication callback flow is invalid.");
   }
   const auth = requireAuthClient(client);
-  return authResult(flowId
+  const data = await authResult(flowId
     ? auth.exchangeCodeForSession(code, { flowId })
     : auth.exchangeCodeForSession(code));
+  if (!data?.session) {
+    const error = new Error("The authentication callback did not create a session.");
+    error.code = "session_not_created";
+    throw error;
+  }
+  return data;
 }
 
 function updatePassword(client, password) {

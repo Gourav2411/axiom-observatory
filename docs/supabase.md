@@ -107,7 +107,7 @@ In Supabase Authentication → URL Configuration, set the Site URL to:
 https://axiom-observatory.minionarts.chatgpt.site
 ```
 
-Allow these exact Redirect URLs—do not use a production wildcard:
+Allow these exact Redirect URLs:
 
 ```text
 https://axiom-observatory.minionarts.chatgpt.site/auth/callback
@@ -117,6 +117,13 @@ http://localhost:4174/reset-password
 http://127.0.0.1:4174/auth/callback
 http://127.0.0.1:4174/reset-password
 ```
+
+The client also appends a validated `sb_flow_id` query parameter so concurrent
+PKCE flows use the verifier created for that exact attempt. Keep the exact
+entries above and add the same six entries with the narrowly scoped
+`?sb_flow_id=*` suffix shown in `supabase/config.toml`; do not use a path-wide
+production wildcard. If Supabase falls back to the Site URL, the application
+also accepts a coded root callback and immediately cleans its one-time values.
 
 The Site URL is the safe default used when a flow omits its redirect. Application calls should still pass the appropriate explicit URL. If custom email templates construct links from `{{ .SiteURL }}`, update them to honor `{{ .RedirectTo }}`; the stock `{{ .ConfirmationURL }}` already carries the allowed destination.
 

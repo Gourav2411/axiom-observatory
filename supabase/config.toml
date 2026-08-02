@@ -162,11 +162,17 @@ site_url = "https://axiom-observatory.minionarts.chatgpt.site"
 # Exact application destinations for OAuth/magic-link callbacks and password recovery.
 additional_redirect_urls = [
   "https://axiom-observatory.minionarts.chatgpt.site/auth/callback",
+  "https://axiom-observatory.minionarts.chatgpt.site/auth/callback?sb_flow_id=*",
   "https://axiom-observatory.minionarts.chatgpt.site/reset-password",
+  "https://axiom-observatory.minionarts.chatgpt.site/reset-password?sb_flow_id=*",
   "http://localhost:4174/auth/callback",
+  "http://localhost:4174/auth/callback?sb_flow_id=*",
   "http://localhost:4174/reset-password",
+  "http://localhost:4174/reset-password?sb_flow_id=*",
   "http://127.0.0.1:4174/auth/callback",
+  "http://127.0.0.1:4174/auth/callback?sb_flow_id=*",
   "http://127.0.0.1:4174/reset-password",
+  "http://127.0.0.1:4174/reset-password?sb_flow_id=*",
 ]
 # How long tokens are valid for, in seconds. Defaults to 3600 (1 hour), maximum 604,800 (1 week).
 jwt_expiry = 3600

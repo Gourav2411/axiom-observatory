@@ -129,6 +129,14 @@ test("Supabase Auth config pins production and local callback destinations", asy
     "http://127.0.0.1:4174/auth/callback",
     "http://127.0.0.1:4174/reset-password",
   ]) assert.ok(config.includes(`"${redirect}"`), `missing exact Auth redirect: ${redirect}`);
+  for (const redirect of [
+    "https://axiom-observatory.minionarts.chatgpt.site/auth/callback?sb_flow_id=*",
+    "https://axiom-observatory.minionarts.chatgpt.site/reset-password?sb_flow_id=*",
+    "http://localhost:4174/auth/callback?sb_flow_id=*",
+    "http://localhost:4174/reset-password?sb_flow_id=*",
+    "http://127.0.0.1:4174/auth/callback?sb_flow_id=*",
+    "http://127.0.0.1:4174/reset-password?sb_flow_id=*",
+  ]) assert.ok(config.includes(`"${redirect}"`), `missing flow-scoped Auth redirect: ${redirect}`);
   assert.match(config, /\[auth\.email\][\s\S]*?enable_confirmations = true/);
   assert.match(config, /\[auth\.external\.google\][\s\S]*?enabled = false[\s\S]*?client_id = ""[\s\S]*?secret = "env\(SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_SECRET\)"/);
   assert.match(config, /file_size_limit = "50MiB"/);
@@ -145,5 +153,6 @@ test("production browser builds enable the verified Google provider unless expli
   const source = await readFile(supabaseClientUrl, "utf8");
   assert.match(source, /googleUiFlag \? googleUiFlag === "true" : import\.meta\.env\.PROD/);
   assert.match(source, /supabaseGoogleConfigured = supabaseBrowserConfigured/);
+  assert.match(source, /appendPkceFlowIdToRedirects: true/);
   assert.doesNotMatch(source, /CLIENT_SECRET|SERVICE_ROLE/);
 });
