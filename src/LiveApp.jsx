@@ -1,11 +1,18 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
-  ArrowClockwise, ArrowSquareOut, CheckCircle, CloudCheck, Database,
-  DownloadSimple, Flask, LockKey, MagnifyingGlass, Play, ShieldWarning, SignOut,
-  Sparkle, UserCircle, Warning,
+  ArrowClockwise, ArrowLeft, ArrowSquareOut, CheckCircle, CloudCheck, Database,
+  DownloadSimple, EnvelopeSimple, Flask, GoogleLogo, Key, LockKey, MagnifyingGlass,
+  Play, ShieldWarning, SignOut, Sparkle, UserCircle, Warning, X,
 } from "@phosphor-icons/react";
 import { api } from "./api.js";
-import { supabase, supabaseBrowserConfigured } from "./supabase.js";
+import {
+  authErrorMessage, authIntentFromRedirectType, authSuccessMessage,
+  clearAuthCallbackLocation, exchangeAuthCallback, googleSignIn, passwordSignIn,
+  isDuplicateSignupError, isMissingMagicAccountError, passwordSignUp,
+  readAuthCallback, sendMagicLink,
+  sendPasswordReset, updatePassword, validateNewPassword,
+} from "./auth-flow.js";
+import { supabase, supabaseBrowserConfigured, supabaseGoogleConfigured } from "./supabase.js";
 
 const SAVED_RUN_KEY = "axiom:last-evidence-run";
 const RUN_TABS = ["Research", "Index", "Evidence", "Literature", "Provenance", "Capabilities"];
@@ -17,6 +24,7 @@ const INDEX_COUNTS = [
   ["chunks", "Chunks"],
   ["embeddedChunks", "Embedded chunks"],
 ];
+const INITIAL_AUTH_CALLBACK = readAuthCallback();
 
 function savedRunId() {
   try {
@@ -88,23 +96,124 @@ function SearchField({ label, placeholder, value, onChange, onSearch, searching,
   </div>;
 }
 
-function AuthPanel() {
-  const [mode,setMode]=useState("sign-in"); const [email,setEmail]=useState(""); const [password,setPassword]=useState("");
-  const [loading,setLoading]=useState(false); const [error,setError]=useState(""); const [message,setMessage]=useState("");
+const AUTH_MODE_COPY = {
+  "sign-in": {
+    title: "Enter the observatory.",
+    description: "Resume a protected evidence workspace with your email and password.",
+    submit: "Sign in",
+    busy: "Signing in…",
+  },
+  "sign-up": {
+    title: "Create your workspace.",
+    description: "Use a verified email to create a durable, access-controlled research workspace.",
+    submit: "Create account",
+    busy: "Creating account…",
+  },
+  magic: {
+    title: "Sign in without a password.",
+    description: "We will send a single-use link. Open it in this same browser to enter an existing workspace.",
+    submit: "Send magic link",
+    busy: "Sending link…",
+  },
+  reset: {
+    title: "Reset your password.",
+    description: "We will email a secure recovery link. Open it in this same browser to continue.",
+    submit: "Send reset link",
+    busy: "Sending reset link…",
+  },
+};
+
+function AuthFeedback({ error, message, id = "auth-feedback" }) {
+  if (error) return <div className="live-error" id={id} role="alert"><Warning/>{error}</div>;
+  if (message) return <div className="live-auth-message" id={id} role="status"><CheckCircle/>{message}</div>;
+  return null;
+}
+
+function AuthPanel({ initialMode = "sign-in", initialError = "", onLeaveCallback }) {
+  const [mode,setMode]=useState(initialMode); const [email,setEmail]=useState(""); const [password,setPassword]=useState("");
+  const [loading,setLoading]=useState(false); const [error,setError]=useState(initialError); const [message,setMessage]=useState("");
+  const headingRef=useRef(null); const previousMode=useRef(mode);
+  const copy=AUTH_MODE_COPY[mode]; const emailOnly=mode==="magic"||mode==="reset"; const showProviders=mode==="sign-in"||mode==="sign-up";
+  useEffect(()=>{if(previousMode.current!==mode)headingRef.current?.focus();previousMode.current=mode;},[mode]);
+  const changeMode=(next)=>{if(loading)return;setMode(next);setError("");setMessage("");if(next==="sign-in")onLeaveCallback?.();};
   const submit=async(event)=>{
     event.preventDefault(); setLoading(true); setError(""); setMessage("");
     try {
-      const action=mode==="sign-in"?supabase.auth.signInWithPassword({email,password}):supabase.auth.signUp({email,password});
-      const {data,error:authError}=await action;
-      if(authError)setError(authError.message);
-      else if(mode==="sign-up"&&!data.session)setMessage("Check your email to confirm the account, then sign in.");
+      if(mode==="sign-in")await passwordSignIn(supabase,{email,password});
+      if(mode==="sign-up"){
+        const data=await passwordSignUp(supabase,{email,password});
+        if(!data.session)setMessage("Check your inbox to confirm the account, then return here to sign in.");
+      }
+      if(mode==="magic"){
+        await sendMagicLink(supabase,{email});
+        setMessage("If this address can sign in, a magic link is on its way. Open it in this same browser.");
+      }
+      if(mode==="reset"){
+        await sendPasswordReset(supabase,{email});
+        setMessage("If an account exists, a reset link is on its way. Open it in this same browser.");
+      }
     } catch(authError) {
-      setError(authError.message||"Supabase Auth is unavailable.");
+      const absentMagicAccount=mode==="magic"&&isMissingMagicAccountError(authError);
+      const duplicateSignup=mode==="sign-up"&&isDuplicateSignupError(authError);
+      if(absentMagicAccount)setMessage("If this address can sign in, a magic link is on its way. Open it in this same browser.");
+      else if(duplicateSignup)setMessage("Check your inbox to confirm the account, then return here to sign in.");
+      else setError(authErrorMessage(authError));
     } finally {
       setLoading(false);
     }
   };
-  return <main className="live-shell live-auth"><section><span className="live-kicker"><LockKey/> Protected workspace</span><h1>Sign in to durable research.</h1><p>Supabase Auth protects workspace-owned evidence runs. Your browser token is forwarded to the API; the service-role credential remains server-only.</p><form onSubmit={submit}><label>Email<input type="email" value={email} onChange={(event)=>setEmail(event.target.value)} autoComplete="email" required/></label><label>Password<input type="password" value={password} onChange={(event)=>setPassword(event.target.value)} autoComplete={mode==="sign-in"?"current-password":"new-password"} minLength="10" required/></label>{error&&<div className="live-error"><Warning/>{error}</div>}{message&&<div className="live-auth-message"><CheckCircle/>{message}</div>}<button className="live-primary" disabled={loading}>{loading?"Authenticating…":mode==="sign-in"?"Sign in":"Create account"}</button></form><button className="live-auth-switch" onClick={()=>{setMode(mode==="sign-in"?"sign-up":"sign-in");setError("");setMessage("");}}>{mode==="sign-in"?"Need an account? Create one":"Already registered? Sign in"}</button></section></main>;
+  const signInWithGoogle=async()=>{
+    if(!supabaseGoogleConfigured)return;
+    setLoading(true);setError("");setMessage("");
+    try { await googleSignIn(supabase,{}); }
+    catch(authError){setError(authErrorMessage(authError));}
+    finally { setLoading(false); }
+  };
+  return <main className="live-shell live-auth"><section className="live-auth-card">
+    {emailOnly&&<button type="button" className="live-auth-back" onClick={()=>changeMode("sign-in")} disabled={loading}><ArrowLeft/> Back to sign in</button>}
+    <span className="live-kicker"><LockKey/> Protected workspace</span><h1 ref={headingRef} tabIndex="-1">{copy.title}</h1><p>{copy.description}</p>
+    {showProviders&&<>
+      <button type="button" className="live-oauth-button" onClick={signInWithGoogle} disabled={loading||!supabaseGoogleConfigured}><GoogleLogo weight="bold"/><span>{supabaseGoogleConfigured?"Continue with Google":"Google sign-in unavailable"}</span></button>
+      {!supabaseGoogleConfigured&&<p className="live-auth-provider-note">Continue with email while Google access is unavailable.</p>}
+      <div className="live-auth-divider"><span>or continue with email</span></div>
+    </>}
+    <form onSubmit={submit}>
+      <label htmlFor="auth-email">Email<input id="auth-email" type="email" value={email} onChange={(event)=>setEmail(event.target.value)} autoComplete="email" inputMode="email" aria-describedby={error||message?"auth-feedback":undefined} aria-invalid={Boolean(error)} disabled={loading} required/></label>
+      {!emailOnly&&<label htmlFor="auth-password">Password<input id="auth-password" type="password" value={password} onChange={(event)=>setPassword(event.target.value)} autoComplete={mode==="sign-in"?"current-password":"new-password"} minLength={mode==="sign-up"?10:undefined} aria-describedby={mode==="sign-up"?"auth-password-help":error?"auth-feedback":undefined} aria-invalid={Boolean(error)} disabled={loading} required/>{mode==="sign-up"&&<small id="auth-password-help" className="live-auth-field-help">Use at least 10 characters.</small>}</label>}
+      <AuthFeedback error={error} message={message}/>
+      <button type="submit" className="live-primary" disabled={loading}>{loading?copy.busy:copy.submit}</button>
+    </form>
+    {mode==="sign-in"&&<div className="live-auth-actions"><button type="button" onClick={()=>changeMode("magic")} disabled={loading}><EnvelopeSimple/> Use a magic link</button><button type="button" onClick={()=>changeMode("reset")} disabled={loading}><Key/> Forgot password?</button></div>}
+    {showProviders&&<button type="button" className="live-auth-switch" onClick={()=>changeMode(mode==="sign-up"?"sign-in":"sign-up")} disabled={loading}>{mode==="sign-up"?"Already registered? Sign in":"New to Axiom? Create an account"}</button>}
+    <p className="live-auth-security">Your session token is forwarded only to the evidence API. Service-role credentials remain server-side.</p>
+  </section></main>;
+}
+
+function PasswordRecoveryPanel({ onComplete, onCancel }) {
+  const [password,setPassword]=useState(""); const [confirmation,setConfirmation]=useState("");
+  const [loading,setLoading]=useState(false); const [error,setError]=useState("");
+  const submit=async(event)=>{
+    event.preventDefault();setError("");
+    const validationError=validateNewPassword(password,confirmation);
+    if(validationError){setError(validationError);return;}
+    setLoading(true);
+    try { await updatePassword(supabase,password);onComplete(); }
+    catch(authError){setError(authErrorMessage(authError));setLoading(false);}
+  };
+  return <main className="live-shell live-auth"><section className="live-auth-card">
+    <span className="live-kicker"><Key/> Account recovery</span><h1>Choose a new password.</h1><p>Your recovery link created a temporary authenticated session. Update the password before entering the workspace.</p>
+    <form onSubmit={submit}>
+      <label htmlFor="new-password">New password<input id="new-password" type="password" value={password} onChange={(event)=>setPassword(event.target.value)} autoComplete="new-password" minLength="10" aria-describedby={error?"recovery-feedback":"recovery-password-help"} aria-invalid={Boolean(error)} disabled={loading} required/><small id="recovery-password-help" className="live-auth-field-help">Use at least 10 characters.</small></label>
+      <label htmlFor="confirm-password">Confirm password<input id="confirm-password" type="password" value={confirmation} onChange={(event)=>setConfirmation(event.target.value)} autoComplete="new-password" minLength="10" aria-describedby={error?"recovery-feedback":undefined} aria-invalid={Boolean(error)} disabled={loading} required/></label>
+      <AuthFeedback error={error} id="recovery-feedback"/><button type="submit" className="live-primary" disabled={loading}>{loading?"Updating password…":"Update password"}</button>
+    </form>
+    <button type="button" className="live-auth-switch" onClick={onCancel} disabled={loading}>Cancel and sign out</button>
+  </section></main>;
+}
+
+function AuthNotice({ message, onDismiss, tone = "success" }) {
+  if(!message)return null;
+  return <div className={`live-auth-notice is-${tone}`} role={tone==="error"?"alert":"status"}>{tone==="error"?<Warning weight="fill"/>:<CheckCircle weight="fill"/>}<span>{message}</span><button type="button" aria-label="Dismiss" onClick={onDismiss}><X/></button></div>;
 }
 
 function AuthConfigurationMissing() {
@@ -358,7 +467,7 @@ function RunView({run,onNewRun,user,onSignOut,accessToken}) {
     <aside className="live-context"><label>Target context</label><h1>{run.target?.label}</h1><p>{run.target?.name||run.target?.id}</p><code>{run.target?.id}</code><hr/><h4>Disease</h4><h2>{run.disease?.label}</h2><code>{run.disease?.id}</code><hr/><h4>Evidence boundary</h4><p>This run retrieves and organizes evidence. It does not validate causality, binding, toxicity, or efficacy.</p><div className={`live-persistence ${persistence.durable?"is-durable":""}`}>{persistence.durable?<CloudCheck/>:<Warning/>}<span><strong>{persistence.durable?"Durable Supabase run":"Ephemeral run store"}</strong><small>{persistence.durable?"The versioned run snapshot is persisted in Supabase Postgres.":"Only the run ID is retained in this browser; the server record resets on restart."}</small></span></div></aside>
     <section className="live-workspace"><div className="live-workspace-title"><span>Evidence pipeline</span><small>Created {new Date(run.createdAt).toLocaleString()}</small></div><div className="live-stages">{run.stages?.map(stage=><StageCard key={stage.id} stage={stage} selected={stage.id===selectedStage} onClick={()=>selectStage(stage)}/>)}</div><div className="live-inspector"><nav aria-label="Run workspace" role="tablist">{RUN_TABS.map(name=>{const slug=name.toLowerCase();return <button type="button" role="tab" id={`live-tab-${slug}`} aria-controls={`live-panel-${slug}`} aria-selected={tab===name} tabIndex={tab===name?0:-1} className={tab===name?"is-active":""} onClick={()=>setTab(name)} onKeyDown={(event)=>onTabKeyDown(event,name)} key={name}>{name}{name==="Index"&&present(run.rag?.counts?.chunks)&&<span>{run.rag.counts.chunks}</span>}{name==="Evidence"&&<span>{run.evidence?.count??0}</span>}{name==="Literature"&&<span>{run.literature?.hitCount??0}</span>}</button>;})}</nav><div className="live-inspector-body" role="tabpanel" id={`live-panel-${tab.toLowerCase()}`} aria-labelledby={`live-tab-${tab.toLowerCase()}`} tabIndex={0}>{panel}</div></div></section>
     <aside className="live-decision"><label>Scientific judge</label><section className="live-score"><span>Association score</span><strong>{score==null?"—":Number(score).toFixed(3)}</strong><p>Upstream Open Targets ranking signal. It is not a confidence probability.</p></section><section><label>Direct evidence</label><h3>{run.evidence?.count??0} records</h3><p>{run.evidence?.pageNote}</p></section><section><label>Computational blockers</label>{run.stages?.filter(stage=>stage.status==="not_configured").map(stage=><div className="live-blocker" key={stage.id}><ShieldWarning/><span><strong>{stage.label}</strong><small>{stage.reason}</small></span></div>)}</section>{run.warnings?.length>0&&<section><label>Run warnings</label>{run.warnings.map(w=><p className="live-warning" key={w}>{w}</p>)}</section>}</aside>
-    <footer className="live-footer"><span><i/> Evidence sources connected</span><span>Schema {run.schemaVersion}</span><span>Predictions are unavailable until validated workers are installed.</span><span>Open-source core · v0.2</span></footer>
+    <footer className="live-footer"><span><i/> Evidence sources connected</span><span>Schema {run.schemaVersion}</span><span>Predictions are unavailable until validated workers are installed.</span><span>Open-source core · v0.4</span></footer>
   </div>;
 }
 
@@ -366,6 +475,12 @@ export function LiveApp(){
   const [initialRunId,setInitialRunId]=useState(savedRunId);
   const [health,setHealth]=useState(null); const [run,setRun]=useState(null); const [restoring,setRestoring]=useState(Boolean(initialRunId)); const [error,setError]=useState("");
   const [auth,setAuth]=useState({loading:supabaseBrowserConfigured,session:null,user:null});
+  const [recovery,setRecovery]=useState(false);
+  const [authNotice,setAuthNotice]=useState("");
+  const [authIssue,setAuthIssue]=useState("");
+  const [authCallback,setAuthCallback]=useState(INITIAL_AUTH_CALLBACK);
+  const callbackError=authCallback.error?authErrorMessage(authCallback.error):"";
+  const clearAuthCallback=()=>{clearAuthCallbackLocation();setAuthCallback({intent:null,error:null,isAuthRoute:false,hasAuthResponse:false});};
   useEffect(()=>{
     let active=true;
     api.health().then(value=>active&&setHealth(value)).catch(e=>{if(active){setError(e.message);setRestoring(false);}});
@@ -373,25 +488,73 @@ export function LiveApp(){
   },[]);
   useEffect(()=>{
     if(!supabase){setAuth({loading:false,session:null,user:null});return undefined;}
-    let active=true;
-    supabase.auth.getSession().then(({data})=>{if(active)setAuth({loading:false,session:data.session,user:data.session?.user??null});});
-    const {data:{subscription}}=supabase.auth.onAuthStateChange((_event,session)=>{if(active)setAuth({loading:false,session,user:session?.user??null});});
+    let active=true; let callbackExchangePending=authCallback.hasAuthResponse&&!authCallback.error;
+    const {data:{subscription}}=supabase.auth.onAuthStateChange((event,session)=>{
+      if(!active)return;
+      const verifiedRecovery=event==="PASSWORD_RECOVERY";
+      setAuth({loading:callbackExchangePending,session,user:session?.user??null});
+      if(verifiedRecovery)setRecovery(true);
+    });
+    const initialize=async()=>{
+      if(callbackExchangePending){
+        try {
+          const exchange=exchangeAuthCallback(supabase);
+          clearAuthCallbackLocation();
+          const data=await exchange;
+          if(!active)return;
+          callbackExchangePending=false;
+          const intent=authIntentFromRedirectType(data.redirectType);
+          if(authCallback.intent==="recovery"&&intent!=="recovery"){
+            setRecovery(false);
+            setAuthCallback(current=>({...current,hasAuthResponse:false,error:{code:"invalid_recovery_callback",message:"This link did not create a recovery session."}}));
+          }else{
+            if(intent==="recovery")setRecovery(true);
+            setAuthCallback(current=>({...current,intent,error:null,hasAuthResponse:false}));
+          }
+          setAuth({loading:false,session:data.session,user:data.session?.user??null});
+        }catch(exchangeError){
+          callbackExchangePending=false;clearAuthCallbackLocation();
+          const {data}=await supabase.auth.getSession();
+          if(!active)return;
+          setRecovery(false);
+          setAuth({loading:false,session:data.session,user:data.session?.user??null});
+          setAuthCallback(current=>({...current,hasAuthResponse:false,error:{code:exchangeError?.code??"callback_exchange_failed",message:exchangeError?.message??"Authentication could not be completed."}}));
+        }
+        return;
+      }
+      const {data}=await supabase.auth.getSession();
+      if(active)setAuth({loading:false,session:data.session,user:data.session?.user??null});
+    };
+    initialize().catch(()=>active&&setAuth({loading:false,session:null,user:null}));
     return()=>{active=false;subscription.unsubscribe();};
   },[]);
   useEffect(()=>{
-    if(!health||auth.loading)return undefined;
+    if(auth.loading||!authCallback.isAuthRoute)return;
+    if(authCallback.error){if(auth.session)setAuthIssue(authErrorMessage(authCallback.error));clearAuthCallbackLocation();return;}
+    if(authCallback.intent!=="recovery"&&auth.session){
+      setAuthIssue("");
+      setAuthNotice(authSuccessMessage(authCallback.intent));
+      clearAuthCallback();
+    }
+  },[auth.loading,auth.session]);
+  useEffect(()=>{if(recovery)clearAuthCallbackLocation();},[recovery]);
+  useEffect(()=>{
+    if(!health||auth.loading||recovery)return undefined;
     if(!initialRunId){setRestoring(false);return undefined;}
     if(health.authRequired&&!auth.session){setRestoring(false);setRun(null);return undefined;}
     let active=true; setRestoring(true);
     api.getRun(initialRunId,auth.session?.access_token).then(value=>{if(active)setRun(value);}).catch(e=>{if(active){localStorage.removeItem(SAVED_RUN_KEY);setInitialRunId(null);setError(`Saved run could not be restored: ${e.message}`);}}).finally(()=>active&&setRestoring(false));
     return()=>{active=false;};
-  },[health,auth.loading,auth.session?.access_token,initialRunId]);
-  const signOut=async()=>{if(supabase)await supabase.auth.signOut();setRun(null);};
+  },[health,auth.loading,auth.session?.access_token,initialRunId,recovery]);
+  const signOut=async()=>{if(supabase)await supabase.auth.signOut();setRun(null);setRecovery(false);setAuthNotice("");setAuthIssue("");clearAuthCallback();};
+  const finishRecovery=()=>{setRecovery(false);setAuthIssue("");setAuthNotice("Password updated. Your protected workspace is ready.");clearAuthCallback();};
   const createRun=async input=>{const next=await api.createRun(input,auth.session?.access_token);localStorage.setItem(SAVED_RUN_KEY,JSON.stringify(next.id));setRun(next);};
-  if(restoring) return <main className="live-shell live-restoring"><CloudCheck/><strong>Restoring evidence run</strong><small>Loading the authoritative server record…</small></main>;
-  if(health?.authRequired&&auth.loading) return <main className="live-shell live-restoring"><LockKey/><strong>Checking Supabase session</strong><small>Restoring the authenticated workspace…</small></main>;
+  if((health?.authRequired||recovery||authCallback.isAuthRoute)&&auth.loading) return <main className="live-shell live-restoring"><LockKey/><strong>Checking Supabase session</strong><small>Restoring the authenticated workspace…</small></main>;
   if(health?.authRequired&&!supabaseBrowserConfigured) return <AuthConfigurationMissing/>;
-  if(health?.authRequired&&!auth.session) return <AuthPanel/>;
-  if(run) return <RunView run={run} onNewRun={()=>{localStorage.removeItem(SAVED_RUN_KEY);setInitialRunId(null);setRun(null);}} user={auth.user} onSignOut={signOut} accessToken={auth.session?.access_token}/>;
-  return <main className="live-shell">{error&&<div className="live-global-error">API unavailable: {error}</div>}<Setup health={health} onRun={createRun} user={auth.user} onSignOut={signOut}/></main>;
+  if(recovery&&auth.session) return <PasswordRecoveryPanel onComplete={finishRecovery} onCancel={signOut}/>;
+  if((recovery&&!auth.session)||(authCallback.intent==="recovery"&&!recovery)) return <AuthPanel initialMode="reset" initialError={callbackError||"This recovery link is invalid or has expired. Request a new one."} onLeaveCallback={()=>{setRecovery(false);clearAuthCallback();}}/>;
+  if(restoring) return <main className="live-shell live-restoring"><CloudCheck/><strong>Restoring evidence run</strong><small>Loading the authoritative server record…</small></main>;
+  if(health?.authRequired&&!auth.session) return <AuthPanel initialError={callbackError} onLeaveCallback={clearAuthCallback}/>;
+  if(run) return <><AuthNotice message={authIssue||authNotice} tone={authIssue?"error":"success"} onDismiss={()=>authIssue?setAuthIssue(""):setAuthNotice("")}/><RunView run={run} onNewRun={()=>{localStorage.removeItem(SAVED_RUN_KEY);setInitialRunId(null);setRun(null);}} user={auth.user} onSignOut={signOut} accessToken={auth.session?.access_token}/></>;
+  return <main className="live-shell"><AuthNotice message={authIssue||authNotice} tone={authIssue?"error":"success"} onDismiss={()=>authIssue?setAuthIssue(""):setAuthNotice("")}/>{error&&<div className="live-global-error">API unavailable: {error}</div>}<Setup health={health} onRun={createRun} user={auth.user} onSignOut={signOut}/></main>;
 }

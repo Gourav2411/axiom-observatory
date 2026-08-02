@@ -5,6 +5,7 @@ import test from "node:test";
 const migrationUrl = new URL("../supabase/migrations/20260801173000_initial_axiom_backend.sql", import.meta.url);
 const ragMigrationUrl = new URL("../supabase/migrations/20260801203000_hybrid_rag_pipeline.sql", import.meta.url);
 const configUrl = new URL("../supabase/config.toml", import.meta.url);
+const envExampleUrl = new URL("../.env.example", import.meta.url);
 
 test("Supabase migration contains the durable run snapshot contract", async () => {
   const sql = await readFile(migrationUrl, "utf8");
@@ -115,11 +116,26 @@ test("hybrid RAG RPCs derive ownership and persist auditable retrievals", async 
   assert.match(sql, /grant execute on function public\.execute_run_retrieval_v2[\s\S]+to authenticated, service_role/i);
 });
 
-test("local Supabase config targets the application origin", async () => {
+test("Supabase Auth config pins production and local callback destinations", async () => {
   const config = await readFile(configUrl, "utf8");
   assert.match(config, /project_id = "axiom-observatory"/);
-  assert.match(config, /site_url = "http:\/\/localhost:4174"/);
-  assert.match(config, /file_size_limit = "500MiB"/);
+  assert.match(config, /site_url = "https:\/\/axiom-observatory\.minionarts\.chatgpt\.site"/);
+  for (const redirect of [
+    "https://axiom-observatory.minionarts.chatgpt.site/auth/callback",
+    "https://axiom-observatory.minionarts.chatgpt.site/reset-password",
+    "http://localhost:4174/auth/callback",
+    "http://localhost:4174/reset-password",
+    "http://127.0.0.1:4174/auth/callback",
+    "http://127.0.0.1:4174/reset-password",
+  ]) assert.ok(config.includes(`"${redirect}"`), `missing exact Auth redirect: ${redirect}`);
+  assert.match(config, /\[auth\.email\][\s\S]*?enable_confirmations = true/);
+  assert.match(config, /\[auth\.external\.google\][\s\S]*?enabled = false[\s\S]*?client_id = ""[\s\S]*?secret = "env\(SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_SECRET\)"/);
+  assert.match(config, /file_size_limit = "50MiB"/);
   assert.match(config, /\[storage\.vector\]\s+enabled = false/);
-  assert.match(config, /enabled = true/);
+});
+
+test("browser environment example keeps Google sign-in disabled by default", async () => {
+  const envExample = await readFile(envExampleUrl, "utf8");
+  assert.match(envExample, /^VITE_SUPABASE_GOOGLE_ENABLED=false$/m);
+  assert.doesNotMatch(envExample, /^VITE_.*(?:SERVICE_ROLE|CLIENT_SECRET)/m);
 });

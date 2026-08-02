@@ -39,9 +39,10 @@ SUPABASE_URL=http://127.0.0.1:54321
 SUPABASE_SERVICE_ROLE_KEY=your-local-service-role-key
 VITE_SUPABASE_URL=http://127.0.0.1:54321
 VITE_SUPABASE_PUBLISHABLE_KEY=your-local-anon-or-publishable-key
+VITE_SUPABASE_GOOGLE_ENABLED=false
 ```
 
-The same-origin Vite middleware receives the two unprefixed server variables. Only `VITE_SUPABASE_URL` and the publishable key enter the browser bundle. The service-role key must never use a `VITE_` prefix.
+The same-origin Vite middleware receives the two unprefixed server variables. Only `VITE_SUPABASE_URL`, the publishable key, and the non-secret Google UI flag enter the browser bundle. The service-role key and OAuth client secret must never use a `VITE_` prefix. `VITE_SUPABASE_GOOGLE_ENABLED` only controls whether the application offers the Google button; it does not enable or secure the Supabase provider.
 
 Serve all local Edge Functions in a dedicated terminal:
 
@@ -56,6 +57,8 @@ npm run dev -- --host 0.0.0.0 --port 4174 --strictPort
 ```
 
 Sign in through the browser before creating a durable run. The API validates the session before contacting upstream evidence providers, so an unauthenticated durable request cannot trigger upstream work or database mutation.
+
+Local email/password registration requires confirmation. Open Mailpit at the URL reported by `supabase status` to follow confirmation, magic-link, and password-recovery emails. Magic-link and Google flows must redirect to `http://localhost:4174/auth/callback`; recovery must redirect to `http://localhost:4174/reset-password`. Keep the Google UI flag `false` unless the local Google provider has also been configured.
 
 Stop the function server normally, then stop the local stack with:
 
@@ -84,11 +87,71 @@ Configure the following values in the application hosting environment:
 - server-only `SUPABASE_URL`;
 - server-only `SUPABASE_SERVICE_ROLE_KEY`;
 - build-time/browser `VITE_SUPABASE_URL`;
-- build-time/browser `VITE_SUPABASE_PUBLISHABLE_KEY`.
+- build-time/browser `VITE_SUPABASE_PUBLISHABLE_KEY`;
+- build-time/browser `VITE_SUPABASE_GOOGLE_ENABLED` (`true` only after provider setup).
 
 The service-role key is used by the server as the Supabase API key. User-owned ingestion, reads, and retrieval forward the user's bearer token as `Authorization`, preserving `auth.uid()` and workspace authorization. The trusted vector-write RPC uses service-role authorization, and the embedding request also sends the key through a private internal header checked by the Edge Function. Never expose it to frontend code, logs, screenshots, client error messages, or `VITE_*` variables.
 
-Before public access, replace localhost Auth URLs in `supabase/config.toml` with the deployed origin and choose explicit signup/invite, email-confirmation, SMTP, CAPTCHA, password, session, and account-recovery policies.
+## Authentication flows and redirect configuration
+
+The browser Auth surface supports four related flows:
+
+- email/password registration and sign-in, with email confirmation required;
+- passwordless email magic links via `signInWithOtp`, returning through `/auth/callback`;
+- password recovery via `resetPasswordForEmail`, returning through `/reset-password`, followed by an authenticated `updateUser({ password })` submission;
+- Google OAuth via `signInWithOAuth({ provider: "google" })`, returning through `/auth/callback`.
+
+In Supabase Authentication → URL Configuration, set the Site URL to:
+
+```text
+https://axiom-observatory.minionarts.chatgpt.site
+```
+
+Allow these exact Redirect URLs—do not use a production wildcard:
+
+```text
+https://axiom-observatory.minionarts.chatgpt.site/auth/callback
+https://axiom-observatory.minionarts.chatgpt.site/reset-password
+http://localhost:4174/auth/callback
+http://localhost:4174/reset-password
+http://127.0.0.1:4174/auth/callback
+http://127.0.0.1:4174/reset-password
+```
+
+The Site URL is the safe default used when a flow omits its redirect. Application calls should still pass the appropriate explicit URL. If custom email templates construct links from `{{ .SiteURL }}`, update them to honor `{{ .RedirectTo }}`; the stock `{{ .ConfirmationURL }}` already carries the allowed destination.
+
+The browser client uses the PKCE flow with automatic callback detection. Supabase therefore returns a short-lived `?code=` that survives an upstream hosting access gateway instead of putting access and refresh tokens in a URL fragment. PKCE requires the callback to complete in the same browser and device that initiated signup, magic link, recovery, or OAuth. Supabase recommends that password-reset pages be publicly reachable; while the Sites deployment remains owner-only, the outer ChatGPT access gate is still an extra dependency and email callbacks are not production-reliable across devices or email-client browsers. The production topology should make the Site public—with Supabase still protecting the application and API—or move these callbacks to another public application host before general use.
+
+### Google provider setup
+
+1. In Google Auth Platform, configure the app audience and consent-screen branding. Keep scopes to `openid`, `userinfo.email`, and `userinfo.profile` unless the product genuinely needs additional Google data.
+2. Create an OAuth Client ID with application type **Web application**.
+3. Add these Authorized JavaScript origins (origins have no path):
+
+   ```text
+   https://axiom-observatory.minionarts.chatgpt.site
+   http://localhost:4174
+   ```
+
+4. Add the Supabase Auth callback—not the application `/auth/callback`—as Google's Authorized redirect URI:
+
+   ```text
+   https://YOUR_PROJECT_REF.supabase.co/auth/v1/callback
+   ```
+
+   Copy the exact hosted callback from Authentication → Sign In / Providers → Google. For a local Supabase OAuth test, Google also needs `http://127.0.0.1:54321/auth/v1/callback`.
+5. In Supabase Authentication → Sign In / Providers → Google, enable the provider and save the Google Client ID and Client Secret. Keep the secret in Supabase; never put it in source control or a `VITE_*` variable.
+6. After the hosted provider and redirect list are saved, set `VITE_SUPABASE_GOOGLE_ENABLED=true` in the application build environment and redeploy the frontend.
+
+The checked-in `[auth.external.google]` block remains disabled so local startup does not claim Google support without credentials. For intentional local OAuth testing, supply the web client ID, provide `SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_SECRET` outside source control, enable that block locally, and retain nonce checks.
+
+### Email delivery and recovery security
+
+Hosted email confirmation, magic-link, and password-reset flows need reliable transactional email. Supabase's default sender is restricted to addresses belonging to the project's organization team, allows only two messages per hour, and has no delivery SLA. It is suitable only for owner-team POC testing. Configure a custom SMTP provider under Authentication → Emails → SMTP Settings before testing other users or carrying production traffic. Send from a trusted application domain, configure SPF/DKIM/DMARC with the provider, and disable link tracking because rewritten single-use Auth links can fail. Enterprise email scanners can also consume a single-use link before the user; if this affects users, use an intermediate application page with a user-initiated confirmation button.
+
+Use generic request-success messages so the UI does not disclose whether an email belongs to an account. Keep redirect destinations exact, enforce reasonable resend/OTP expiry limits, and enable CAPTCHA or Turnstile before exposing email-send forms publicly. The password-update form must only be shown for the authenticated recovery session created by the recovery link.
+
+Before public access, verify the deployed Site URL and exact redirect list against `supabase/config.toml`, confirm email confirmation and custom SMTP delivery, enable CAPTCHA or Turnstile as a release requirement for every public email-send form, and test signup, magic-link, recovery, Google, sign-out, expiry, and refresh behavior end to end.
 
 ## Schema ownership
 

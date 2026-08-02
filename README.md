@@ -79,7 +79,9 @@ Run the application in another terminal:
 npm run dev -- --host 0.0.0.0 --port 4174 --strictPort
 ```
 
-Durable `/api/runs*` routes require a Supabase session. Creating a run then performs authenticated normalized ingestion and bounded embedding batches before marking the RAG index complete. If the embedding worker is unavailable, normalized data remains durable and retrieval reports the Postgres FTS fallback rather than pretending hybrid ranking succeeded.
+Durable `/api/runs*` routes require a Supabase session. Email/password sign-up requires email confirmation. Users can also request a passwordless magic link, request a password-reset email, and—after the provider is configured—sign in with Google. `VITE_SUPABASE_GOOGLE_ENABLED=false` keeps the Google button in its setup-required state by default; it is only a UI switch and does not configure the provider.
+
+Magic-link and Google sign-in return through `/auth/callback`; password recovery returns through `/reset-password`. The browser uses PKCE so credentials return as a short-lived query code instead of URL-fragment tokens; the link must be completed in the same browser that requested it. The checked-in Supabase configuration allows only the exact production destinations at `https://axiom-observatory.minionarts.chatgpt.site` and their localhost development equivalents. Creating a run then performs authenticated normalized ingestion and bounded embedding batches before marking the RAG index complete. If the embedding worker is unavailable, normalized data remains durable and retrieval reports the Postgres FTS fallback rather than pretending hybrid ranking succeeded.
 
 Stop the local stack with `npm run supabase:stop` after stopping the function server.
 
@@ -96,7 +98,9 @@ npx supabase secrets set AXIOM_EMBED_INTERNAL_KEY=YOUR_SERVER_SERVICE_KEY
 npx supabase functions deploy axiom-embed
 ```
 
-Set `AXIOM_EMBED_INTERNAL_KEY` to the same server-only value used by the application for `SUPABASE_SERVICE_ROLE_KEY`; use a secure environment-file or secret manager so it does not enter shell history. Do not deploy the function with `--no-verify-jwt`. Configure `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` as server-side hosting secrets, and build the browser with `VITE_SUPABASE_URL` plus the project's publishable key. Review Auth redirect URLs and account policy before public access. See [docs/supabase.md](docs/supabase.md) for the complete security and deployment notes.
+Set `AXIOM_EMBED_INTERNAL_KEY` to the same server-only value used by the application for `SUPABASE_SERVICE_ROLE_KEY`; use a secure environment-file or secret manager so it does not enter shell history. Do not deploy the function with `--no-verify-jwt`. Configure `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` as server-side hosting secrets, and build the browser with `VITE_SUPABASE_URL` plus the project's publishable key. Set `VITE_SUPABASE_GOOGLE_ENABLED=true` only after Google OAuth is enabled in Supabase.
+
+For Google, create a Google Cloud OAuth client of type **Web application**, add the application origins, and register the Supabase callback URL shown on the Supabase Google provider page. Save the client ID and secret under Authentication → Sign In / Providers → Google; never put the secret in browser environment variables. Use a custom SMTP provider for production email confirmation, magic-link, and recovery delivery: the hosted default sender is restricted to project-team addresses, limited to two messages per hour, and has no delivery SLA. See [docs/supabase.md](docs/supabase.md) for the exact origins, callbacks, redirect allowlist, and complete security notes.
 
 ## Verify
 

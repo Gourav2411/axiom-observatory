@@ -41,6 +41,34 @@ test("falls back to index.html for an unknown app route", async () => {
   assert.deepEqual(calls, ["/flow/step-two?source=share", "/index.html"]);
 });
 
+test("falls back to the app shell for direct auth callback and recovery entries", async () => {
+  for (const path of [
+    "/auth/callback",
+    "/reset-password",
+  ]) {
+    const calls = [];
+    const response = await worker.fetch(
+      new Request(`https://example.test${path}`, {
+        headers: { accept: "text/html" },
+      }),
+      {
+        ASSETS: {
+          fetch: async (request) => {
+            const url = new URL(request.url);
+            calls.push(url.pathname + url.search);
+            return new Response(url.pathname === "/index.html" ? "app" : "missing", {
+              status: url.pathname === "/index.html" ? 200 : 404,
+            });
+          },
+        },
+      },
+    );
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(calls, [path, "/index.html"]);
+  }
+});
+
 test("does not turn missing API or write requests into the app shell", async () => {
   let apiAssetCalls = 0;
   const apiResponse = await worker.fetch(
