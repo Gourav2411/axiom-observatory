@@ -79,7 +79,7 @@ Run the application in another terminal:
 npm run dev -- --host 0.0.0.0 --port 4174 --strictPort
 ```
 
-Durable `/api/runs*` routes require a Supabase session. Email/password sign-up requires email confirmation. Users can also request a passwordless magic link, request a password-reset email, and—after the provider is configured—sign in with Google. `VITE_SUPABASE_GOOGLE_ENABLED=false` keeps the Google button in its setup-required state by default; it is only a UI switch and does not configure the provider.
+Durable `/api/runs*` routes require a Supabase session. Email/password sign-up requires email confirmation. Users can also request a passwordless magic link, request a password-reset email, and sign in with the verified Google provider. Production builds offer Google by default; `VITE_SUPABASE_GOOGLE_ENABLED=false` can explicitly hide it in an environment where the provider is unavailable. The flag is only a UI switch and does not configure or secure the provider.
 
 Magic-link and Google sign-in return through `/auth/callback`; password recovery returns through `/reset-password`. The browser uses PKCE so credentials return as a short-lived query code instead of URL-fragment tokens; the link must be completed in the same browser that requested it. The checked-in Supabase configuration allows only the exact production destinations at `https://axiom-observatory.minionarts.chatgpt.site` and their localhost development equivalents. Creating a run then performs authenticated normalized ingestion and bounded embedding batches before marking the RAG index complete. If the embedding worker is unavailable, normalized data remains durable and retrieval reports the Postgres FTS fallback rather than pretending hybrid ranking succeeded.
 

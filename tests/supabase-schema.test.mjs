@@ -6,6 +6,7 @@ const migrationUrl = new URL("../supabase/migrations/20260801173000_initial_axio
 const ragMigrationUrl = new URL("../supabase/migrations/20260801203000_hybrid_rag_pipeline.sql", import.meta.url);
 const configUrl = new URL("../supabase/config.toml", import.meta.url);
 const envExampleUrl = new URL("../.env.example", import.meta.url);
+const supabaseClientUrl = new URL("../src/supabase.js", import.meta.url);
 
 test("Supabase migration contains the durable run snapshot contract", async () => {
   const sql = await readFile(migrationUrl, "utf8");
@@ -138,4 +139,11 @@ test("browser environment example keeps Google sign-in disabled by default", asy
   const envExample = await readFile(envExampleUrl, "utf8");
   assert.match(envExample, /^VITE_SUPABASE_GOOGLE_ENABLED=false$/m);
   assert.doesNotMatch(envExample, /^VITE_.*(?:SERVICE_ROLE|CLIENT_SECRET)/m);
+});
+
+test("production browser builds enable the verified Google provider unless explicitly disabled", async () => {
+  const source = await readFile(supabaseClientUrl, "utf8");
+  assert.match(source, /googleUiFlag \? googleUiFlag === "true" : import\.meta\.env\.PROD/);
+  assert.match(source, /supabaseGoogleConfigured = supabaseBrowserConfigured/);
+  assert.doesNotMatch(source, /CLIENT_SECRET|SERVICE_ROLE/);
 });

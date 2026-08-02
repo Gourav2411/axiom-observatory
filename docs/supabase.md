@@ -42,7 +42,7 @@ VITE_SUPABASE_PUBLISHABLE_KEY=your-local-anon-or-publishable-key
 VITE_SUPABASE_GOOGLE_ENABLED=false
 ```
 
-The same-origin Vite middleware receives the two unprefixed server variables. Only `VITE_SUPABASE_URL`, the publishable key, and the non-secret Google UI flag enter the browser bundle. The service-role key and OAuth client secret must never use a `VITE_` prefix. `VITE_SUPABASE_GOOGLE_ENABLED` only controls whether the application offers the Google button; it does not enable or secure the Supabase provider.
+The same-origin Vite middleware receives the two unprefixed server variables. Only `VITE_SUPABASE_URL`, the publishable key, and the non-secret Google UI flag enter the browser bundle. The service-role key and OAuth client secret must never use a `VITE_` prefix. Production builds offer the verified Google provider by default; an explicit `VITE_SUPABASE_GOOGLE_ENABLED=false` hides the button in environments where it is unavailable. The flag only controls the UI and does not enable or secure the Supabase provider.
 
 Serve all local Edge Functions in a dedicated terminal:
 
