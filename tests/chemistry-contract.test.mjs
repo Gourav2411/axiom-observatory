@@ -32,6 +32,14 @@ test("docking and retrosynthesis paths cannot fabricate engine outputs", () => {
   assert.match(service, /not RMSD redocking validation/i);
 });
 
+test("private chemistry worker authenticates calls and transfers reproducible artifacts", () => {
+  assert.match(service, /AXIOM_INTERNAL_WORKER_KEY/);
+  assert.match(service, /hmac\.compare_digest/);
+  assert.match(service, /@app\.get\("\/artifacts\/\{artifact_name\}"\)/);
+  assert.match(service, /@app\.post\("\/receptors"\)/);
+  assert.match(service, /sha256/);
+});
+
 test("frontend exposes every local chemistry operation", () => {
   for (const operation of ["prepareMolecule", "predictAdmet", "prepareDocking", "fragmentRetrosynthesis", "listCampaigns", "queueCandidate", "reviewCandidate", "registerTranslationInput", "reviewTranslationInput"]) {
     assert.match(api, new RegExp(operation));

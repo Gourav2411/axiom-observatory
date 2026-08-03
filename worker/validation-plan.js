@@ -92,12 +92,15 @@ const VALIDATION_WORKERS = Object.freeze([
 
 function configuredWorker(env, worker) {
   const endpoint = typeof env?.[worker.envKey] === "string" ? env[worker.envKey].trim() : "";
+  const batchCompute = env?.AXIOM_HEAVY_COMPUTE_MODE === "github_actions" && ["admet", "docking"].includes(worker.id);
   return {
     id: worker.id,
     label: worker.label,
-    status: endpoint ? "configured_not_executed" : "not_configured",
-    configured: Boolean(endpoint),
+    status: batchCompute ? "queued_compute_configured" : endpoint ? "configured_not_executed" : "not_configured",
+    configured: batchCompute || Boolean(endpoint),
     available: false,
+    batchAvailable: batchCompute,
+    execution: batchCompute ? "asynchronous_batched" : "request_response",
     openSource: true,
     toolchain: worker.toolchain,
     kind: worker.kind,
@@ -105,7 +108,9 @@ function configuredWorker(env, worker) {
     requiredInputs: worker.requiredInputs,
     expectedArtifacts: worker.expectedArtifacts,
     outputBoundary: worker.outputBoundary,
-    reason: endpoint
+    reason: batchCompute
+      ? `${worker.label} executes asynchronously on GitHub-hosted runners after a campaign job is queued; availability is reported per job and artifact.`
+      : endpoint
       ? "Worker endpoint is registered with durable leasing, retry budgets, and content-addressed artifact manifests. Availability still depends on the job-specific engine, inputs, controls, and calibrated model assets."
       : `Set ${worker.envKey} to register this worker. No predictions or simulations are produced until a worker is configured and executed.`,
   };
@@ -180,6 +185,8 @@ function validationCapabilities(env = {}) {
       status: state.status,
       configured: state.configured,
       available: false,
+      batchAvailable: state.batchAvailable,
+      execution: state.execution,
       provider: worker.toolchain.join(" + "),
       mode: worker.kind,
       reason: state.reason,

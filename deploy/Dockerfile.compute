@@ -1,0 +1,36 @@
+FROM python:3.12-slim
+
+ARG TARGETARCH
+ARG VINA_VERSION=1.2.7
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    AXIOM_CHEMISTRY_HOST=0.0.0.0 \
+    AXIOM_CHEMISTRY_PORT=10000 \
+    AXIOM_ADMET_EXECUTION_ENABLED=true \
+    AXIOM_VINA_BINARY=/usr/local/bin/vina \
+    MPLCONFIGDIR=/tmp/axiom-matplotlib
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl libexpat1 libgomp1 libsm6 libstdc++6 libxext6 libxrender1 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    case "$TARGETARCH" in \
+      amd64) asset="vina_${VINA_VERSION}_linux_x86_64"; expected="f31f774f723bba7bbe6e9d1c47577020eea9a8da16424284c043d22593570644" ;; \
+      arm64) asset="vina_${VINA_VERSION}_linux_aarch64"; expected="d30c18a7d5f6f8ea9146e1cbc0aa7ade0bbb105b54ece08b4e5a7fa53edb6c62" ;; \
+      *) echo "Unsupported Docker architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    curl --fail --location --retry 4 --output /usr/local/bin/vina "https://github.com/ccsb-scripps/AutoDock-Vina/releases/download/v${VINA_VERSION}/${asset}"; \
+    echo "${expected}  /usr/local/bin/vina" | sha256sum --check -; \
+    chmod 0755 /usr/local/bin/vina; \
+    /usr/local/bin/vina --version
+
+WORKDIR /app
+COPY services/requirements-admet.txt /tmp/requirements-admet.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-admet.txt
+COPY services /app/services
+RUN mkdir -p /app/services/artifacts /app/services/receptors /tmp/axiom-matplotlib
+
+EXPOSE 10000
+CMD ["python", "services/chemistry_worker.py"]

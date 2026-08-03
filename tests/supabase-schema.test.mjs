@@ -171,6 +171,13 @@ test("campaign worker controls and assay ingestion fail closed with tenant bound
   assert.match(controls, /attempts >= max_attempts/i);
   assert.match(controls, /auth\.role\(\) <> 'service_role'/i);
 
+  const scopedLeasing = await readFile(new URL("../supabase/migrations/20260804090000_scoped_campaign_leasing.sql", import.meta.url), "utf8");
+  assert.match(scopedLeasing, /create or replace function public\.lease_campaign_jobs_v2/i);
+  assert.match(scopedLeasing, /p_job_types text\[\]/i);
+  assert.match(scopedLeasing, /j\.job_type = any\(p_job_types\)/i);
+  assert.match(scopedLeasing, /for update skip locked/i);
+  assert.match(scopedLeasing, /grant execute[\s\S]*to service_role/i);
+
   const assays = await readFile(new URL("../supabase/migrations/20260803112000_assay_results.sql", import.meta.url), "utf8");
   assert.match(assays, /create table public\.assay_results/i);
   assert.match(assays, /foreign key \(candidate_id, run_id, workspace_id\)/i);
