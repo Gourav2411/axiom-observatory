@@ -636,4 +636,5 @@ if __name__ == "__main__":
     import uvicorn
 
     port = int(os.environ.get("AXIOM_CHEMISTRY_PORT", "8791"))
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    host = os.environ.get("AXIOM_CHEMISTRY_HOST", "127.0.0.1")
+    uvicorn.run(app, host=host, port=port, log_level="warning")

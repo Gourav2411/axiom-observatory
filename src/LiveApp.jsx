@@ -525,10 +525,10 @@ function ValidationPlan({run, accessToken}) {
   };
   useEffect(()=>{loadPlan();},[run.id]);
   const execute=async(name,action)=>{setRunning(name);setError("");try{return await action();}catch(e){setError(e.message);return null;}finally{setRunning("");}};
-  const prepare=async()=>{const value=await execute("prepare",()=>api.prepareMolecule({smiles,...policy}));if(value){setPrepared(value);setSmiles(value.canonicalSmiles);setAdmet(null);setDocking(null);setRetro(null);}};
-  const predict=async()=>{const value=await execute("admet",()=>api.predictAdmet(prepared?.canonicalSmiles??smiles));if(value)setAdmet(value);};
-  const prepareDocking=async()=>{const value=await execute("docking",()=>api.prepareDocking({...dockInput,smiles:prepared?.canonicalSmiles??smiles}));if(value)setDocking(value);};
-  const fragment=async()=>{const value=await execute("retro",()=>api.fragmentRetrosynthesis(prepared?.canonicalSmiles??smiles));if(value)setRetro(value);};
+  const prepare=async()=>{const value=await execute("prepare",()=>api.prepareMolecule({smiles,...policy},accessToken));if(value){setPrepared(value);setSmiles(value.canonicalSmiles);setAdmet(null);setDocking(null);setRetro(null);}};
+  const predict=async()=>{const value=await execute("admet",()=>api.predictAdmet(prepared?.canonicalSmiles??smiles,accessToken));if(value)setAdmet(value);};
+  const prepareDocking=async()=>{const value=await execute("docking",()=>api.prepareDocking({...dockInput,smiles:prepared?.canonicalSmiles??smiles},accessToken));if(value)setDocking(value);};
+  const fragment=async()=>{const value=await execute("retro",()=>api.fragmentRetrosynthesis(prepared?.canonicalSmiles??smiles,accessToken));if(value)setRetro(value);};
   const workers=Array.isArray(plan?.workers)?plan.workers:[];
   const capabilities=chemistry?.capabilities??{};
   const toolCards=[

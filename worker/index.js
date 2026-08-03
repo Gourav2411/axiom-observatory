@@ -1136,4 +1136,4 @@ export default {
   },
 };
 
-export { handleApi, RUN_SCHEMA_VERSION };
+export { authenticateSupabaseRequest, handleApi, RUN_SCHEMA_VERSION };

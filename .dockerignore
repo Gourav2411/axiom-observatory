@@ -1,0 +1,16 @@
+.git
+.github
+.runtime
+.venv
+.venv-admet
+.venv-retro
+.cache
+node_modules
+dist
+.env
+.env.*
+services/artifacts
+services/receptors
+audit
+*.png
+*.mov
