@@ -14,6 +14,7 @@ test("local chemistry worker exposes real preparation and prediction boundaries"
   assert.match(service, /RDKit ETKDGv3 \+ MMFF94/);
   assert.match(service, /@app\.post\("\/applicability\/admet"\)/);
   assert.match(service, /axiom-admet-domain-registry\.v1/);
+  assert.match(service, /ADMET-AI execution is disabled on this resource-constrained web service/i);
 });
 
 test("docking and retrosynthesis paths cannot fabricate engine outputs", () => {

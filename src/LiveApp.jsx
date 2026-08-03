@@ -533,7 +533,7 @@ function ValidationPlan({run, accessToken}) {
   const capabilities=chemistry?.capabilities??{};
   const toolCards=[
     ["Molecule prep",Atom,capabilities.molecule_prep?.available?"READY":"BLOCKED",capabilities.molecule_prep?.provider,capabilities.molecule_prep?.version,"Canonicalize, calculate descriptors, screen structural alerts and generate a 3D conformer."],
-    ["ADMET & toxicity",ChartLineUp,capabilities.admet?.available?"READY":"BLOCKED",capabilities.admet?.provider,capabilities.admet?.version,"Run the complete physicochemical, ADME and toxicity panel using local model inference."],
+    ["ADMET & toxicity",ChartLineUp,capabilities.admet?.available?"READY":"BLOCKED",capabilities.admet?.provider,capabilities.admet?.version,capabilities.admet?.reason??"Run the complete physicochemical, ADME and toxicity panel using local model inference."],
     ["Docking",Cube,capabilities.docking?.available?"SCORING READY":capabilities.docking?.preparationAvailable?"PREP ONLY":"BLOCKED",capabilities.docking?.provider,capabilities.docking?.version,"Prepare a Meeko ligand and reproducible Vina manifest; scoring waits for a compatible Vina engine."],
     ["Retrosynthesis",TestTube,capabilities.retrosynthesis?.available?"ROUTE READY":capabilities.retrosynthesis?.fragmentAnalysisAvailable?"BRICS ONLY":"BLOCKED",capabilities.retrosynthesis?.available?capabilities.retrosynthesis?.provider:"RDKit BRICS",capabilities.molecule_prep?.version,"Run rule-based synthetic fragment analysis; AiZynthFinder route search still needs policies and stock data."],
   ];

@@ -26,6 +26,8 @@ test("production container co-locates the auditable POC processes", () => {
   assert.match(dockerfile, /libexpat1/);
   assert.doesNotMatch(chemistryWorker, /^from admet_ai import/m);
   assert.match(chemistryWorker, /lazy_on_first_prediction/);
+  assert.match(chemistryWorker, /AXIOM_ADMET_EXECUTION_ENABLED/);
+  assert.match(blueprint, /AXIOM_ADMET_EXECUTION_ENABLED[\s\S]*value: "false"/);
   assert.match(dockerfile, /libxext6/);
   assert.match(dockerfile, /libsm6/);
   assert.match(dockerfile, /start-production\.mjs/);

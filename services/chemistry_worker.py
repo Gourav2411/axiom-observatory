@@ -33,6 +33,14 @@ except importlib.metadata.PackageNotFoundError:
     ADMET_VERSION = None
     ADMET_IMPORT_ERROR = "ADMET-AI is not installed."
 
+ADMET_EXECUTION_ENABLED = os.environ.get("AXIOM_ADMET_EXECUTION_ENABLED", "true").strip().lower() not in {
+    "0", "false", "no", "off",
+}
+ADMET_DISABLED_REASON = (
+    "ADMET-AI execution is disabled on this resource-constrained web service. "
+    "Run it in a separately sized worker or enable AXIOM_ADMET_EXECUTION_ENABLED on an instance with sufficient memory."
+)
+
 
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT_ROOT = ROOT / "services" / "artifacts"
@@ -227,11 +235,12 @@ def health() -> dict[str, Any]:
                 "mode": "local_cpu",
             },
             "admet": {
-                "available": ADMET_VERSION is not None,
+                "available": ADMET_VERSION is not None and ADMET_EXECUTION_ENABLED,
+                "installed": ADMET_VERSION is not None,
                 "provider": "ADMET-AI",
                 "version": ADMET_VERSION,
                 "mode": "local_cpu_model_inference",
-                "reason": ADMET_IMPORT_ERROR,
+                "reason": ADMET_DISABLED_REASON if not ADMET_EXECUTION_ENABLED else ADMET_IMPORT_ERROR,
                 "loading": "lazy_on_first_prediction",
             },
             "docking": {
@@ -324,6 +333,8 @@ def prepare(payload: MoleculeInput) -> dict[str, Any]:
 
 def _get_admet_components() -> tuple[Any, Any]:
     global _admet_model, _admet_info_loader, ADMET_IMPORT_ERROR
+    if not ADMET_EXECUTION_ENABLED:
+        raise HTTPException(status_code=503, detail=ADMET_DISABLED_REASON)
     if ADMET_VERSION is None:
         raise HTTPException(status_code=503, detail=ADMET_IMPORT_ERROR or "ADMET-AI is unavailable.")
     with _admet_lock:
