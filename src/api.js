@@ -11,7 +11,7 @@ async function request(path, options = {}) {
   });
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
-    const message = payload?.error?.message ?? `Request failed with HTTP ${response.status}`;
+    const message = payload?.error?.message ?? payload?.detail ?? `Request failed with HTTP ${response.status}`;
     const error = new Error(message);
     error.code = payload?.error?.code ?? "request_failed";
     error.status = response.status;
@@ -24,8 +24,20 @@ export const api = {
   health: () => request("/api/health"),
   searchTargets: (query) => request(`/api/targets/search?q=${encodeURIComponent(query)}`),
   searchDiseases: (query) => request(`/api/diseases/search?q=${encodeURIComponent(query)}`),
+  searchTargetDiseases: (targetId, query = "") => request(`/api/targets/${encodeURIComponent(targetId)}/diseases?q=${encodeURIComponent(query)}`),
   createRun: (input, accessToken) => request("/api/runs", { method: "POST", body: JSON.stringify(input), accessToken }),
   getRun: (id, accessToken) => request(`/api/runs/${encodeURIComponent(id)}`, { accessToken }),
+  listCampaigns: (id, accessToken) => request(`/api/runs/${encodeURIComponent(id)}/campaigns`, { accessToken }),
+  createCampaign: (id, input, accessToken) => request(`/api/runs/${encodeURIComponent(id)}/campaigns`, { method: "POST", body: JSON.stringify(input), accessToken }),
+  addCampaignCandidate: (id, input, accessToken) => request(`/api/campaigns/${encodeURIComponent(id)}/candidates`, { method: "POST", body: JSON.stringify(input), accessToken }),
+  queueCandidate: (id, accessToken) => request(`/api/candidates/${encodeURIComponent(id)}/queue`, { method: "POST", body: "{}", accessToken }),
+  reviewCandidate: (id, input, accessToken) => request(`/api/candidates/${encodeURIComponent(id)}/reviews`, { method: "POST", body: JSON.stringify(input), accessToken }),
+  getValidationPlan: (id, accessToken) => request(`/api/runs/${encodeURIComponent(id)}/validation-plan`, { accessToken }),
+  chemistryHealth: () => request("/api/chemistry/health"),
+  prepareMolecule: (input) => request("/api/chemistry/prepare", { method: "POST", body: JSON.stringify(input) }),
+  predictAdmet: (smiles) => request("/api/chemistry/admet", { method: "POST", body: JSON.stringify({ smiles }) }),
+  prepareDocking: (input) => request("/api/chemistry/docking/prepare", { method: "POST", body: JSON.stringify(input) }),
+  fragmentRetrosynthesis: (smiles) => request("/api/chemistry/retrosynthesis/fragments", { method: "POST", body: JSON.stringify({ smiles }) }),
   retrieveRun: (id, input, accessToken) => request(`/api/runs/${encodeURIComponent(id)}/retrieval`, {
     method: "POST",
     body: JSON.stringify(input),

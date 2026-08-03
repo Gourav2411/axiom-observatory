@@ -8,7 +8,10 @@ import {
 const RUN_SNAPSHOTS_TABLE = "run_snapshots";
 const SUPABASE_TIMEOUT_MS = 8_000;
 const MAX_RUN_CHUNKS = 500;
-const EMBEDDING_BATCH_SIZE = 6;
+// Supabase Edge isolates enforce a tight CPU budget. Keep each invocation to a
+// single built-in model inference; multi-item requests can be terminated with
+// WORKER_RESOURCE_LIMIT (HTTP 546) before the function returns.
+const EMBEDDING_BATCH_SIZE = 1;
 
 class PersistenceError extends Error {
   constructor(message, { operation, status = null, cause = null } = {}) {

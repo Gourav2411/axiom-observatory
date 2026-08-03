@@ -6,6 +6,13 @@ coverage/
 !.env.example
 npm-debug.log*
 supabase/.temp/
+.venv/
+.venv-admet/
+.venv-retro/
+.cache/
+services/artifacts/
+__pycache__/
+*.py[cod]
 
 # Local design QA and agent working files.
 AGENTS.md

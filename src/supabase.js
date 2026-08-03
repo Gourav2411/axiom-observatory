@@ -15,9 +15,6 @@ export const supabase = supabaseBrowserConfigured
         autoRefreshToken: true,
         detectSessionInUrl: false,
         flowType: "pkce",
-        experimental: {
-          appendPkceFlowIdToRedirects: true,
-        },
       },
     })
   : null;

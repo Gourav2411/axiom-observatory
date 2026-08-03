@@ -9,7 +9,7 @@ The system helps a researcher collect, index, retrieve, and inspect evidence. It
 3. **Computational prediction** — a future model or docking-worker output with model, version, inputs, and uncertainty.
 4. **Experimental validation** — an external laboratory result. The application cannot create this claim.
 
-The current milestone implements the first two classes and retrieval infrastructure. Embedding similarity and reciprocal-rank-fusion values organize passages; they are not biological confidence, causal evidence, toxicity estimates, or experimental validation. Every retrieval response remains `generated: false`.
+The current milestone implements the first two classes, retrieval infrastructure, and a readiness plan for future computational workers. Embedding similarity and reciprocal-rank-fusion values organize passages; they are not biological confidence, causal evidence, toxicity estimates, or experimental validation. The validation plan audits missing molecule/receptor inputs and worker configuration, but it does not execute docking, ADMET, toxicity, or retrosynthesis. Every retrieval response remains `generated: false`.
 
 ## Current hybrid RAG vertical
 
@@ -43,6 +43,8 @@ flowchart TB
   FTS --> TRACE
   TRACE --> UI
   TRACE --> AUDIT["Persisted retrieval + citation audit"]
+  API --> VPLAN["Validation readiness plan<br/>docking · ADMET · retrosynthesis"]
+  VPLAN --> UI
 ```
 
 The Vite development middleware and production worker expose the same `/api/*` contract. Tests inject upstream, persistence, and embedding transports rather than changing production behavior.
@@ -57,6 +59,7 @@ A run is the unit of reproducibility. It contains:
 - normalized record and chunk counts;
 - embedding model, revision, dimensions, chunking configuration, and index status;
 - explicit stage, capability, fallback, and warning states;
+- validation readiness for future docking, ADMET/toxicity, and retrosynthesis workers;
 - a versioned compatibility snapshot for API reads and export;
 - no fabricated fallback values or generated scientific answer.
 
@@ -179,11 +182,21 @@ Not configured. A future synthesizer would need citation-bound claims, unsupport
 
 ### Gate 4 — asynchronous scientific workers
 
-Not configured:
+Implemented for local development:
 
-- Docking: receptor/ligand preparation, Smina or AutoDock Vina execution, pose artifacts, box definition, seeds, logs, and redocking controls.
-- ADMET/toxicity: ADMET-AI model/version, molecular standardization, applicability-domain flags, and prediction uncertainty.
-- Retrosynthesis: AiZynthFinder configuration, stock database version, route score, and complete route artifacts.
+- `/api/runs/:id/validation-plan`;
+- Campaign tab with candidate ingestion, comparative ranking, six-job status, applicability/method boundaries, and human advance/hold/reject review;
+- Supabase-backed campaigns, candidates, evaluations, reviews, idempotent jobs, service-role leasing, and completion RPCs;
+- a local queue consumer launched by `npm run dev`;
+- RDKit molecule preparation, ADMET-AI inference, Meeko docking preparation, and RDKit BRICS execution;
+- structured capability states for docking, ADMET/toxicity, and retrosynthesis;
+- explicit `simulationRun: false` and `generated: false` boundaries.
+
+Capability-gated execution:
+
+- Actual AutoDock Vina subprocess execution requires a registered binary and a prepared receptor under `services/receptors`; an optional known ligand provides a same-box score control, not RMSD redocking.
+- Actual AiZynthFinder subprocess execution requires its binary, expansion/filter policies, stock snapshot, and `AXIOM_AIZYNTH_CONFIG`.
+- Missing engines or inputs create durable `blocked` evaluations and contribute no invented score.
 
 These future outputs remain computational predictions. Wet-lab or clinical validation is a separate evidence class and cannot be inferred from a successful job.
 
@@ -195,8 +208,10 @@ These future outputs remain computational predictions. Wet-lab or clinical valid
 - Citation auditing validates identifier presence, not the correctness or scientific support of a claim.
 - The 500-chunk safety cap and small sequential Edge batches are POC controls, not a high-throughput indexing architecture.
 - Health currently probes Postgres, not the Edge embedding function; actual run/index and retrieval modes are the authoritative capability signal.
-- Durable retry queues, distributed leases, rate limits, operational dashboards, disaster recovery, and model-drift controls are not complete.
-- Docking, molecular preparation, ADMET/toxicity, retrosynthesis, experimental validation, and clinical translation are not available.
+- Distributed worker scaling, heartbeat renewal, dead-letter operations, rate limits, operational dashboards, disaster recovery, and model-drift controls are not complete.
+- Docking scoring and route search are executable adapters but unavailable on a machine that lacks Vina or AiZynthFinder configuration. Experimental validation and clinical translation remain outside the system.
+
+The acceptance criteria and delivery sequence for controlled docking, model applicability domains, route planning, assay ingestion, reproducible campaign artifacts, and Phase I/II model-informed simulation are defined in [development-roadmap.md](development-roadmap.md).
 
 ## Security and governance gates
 

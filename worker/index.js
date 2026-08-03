@@ -1,6 +1,7 @@
 const OPEN_TARGETS_URL = "https://api.platform.opentargets.org/api/v4/graphql";
 const EUROPE_PMC_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search";
 const RUN_SCHEMA_VERSION = "2.0.0";
+const ENTITY_SEARCH_PAGE_SIZE = 30;
 import { PersistenceError, createRunRepository } from "./run-repository.js";
 import {
   CHUNKING_STRATEGY,
@@ -11,6 +12,8 @@ import {
   EMBEDDING_REVISION,
   buildNormalizedRunPayload,
 } from "./rag-pipeline.js";
+import { VALIDATION_WORKERS, buildValidationPlan, validationCapabilities } from "./validation-plan.js";
+import { createCampaignRepository } from "./campaign-repository.js";
 
 class AuthenticationError extends Error {
   constructor(message, code = "authentication_required") {
@@ -22,7 +25,7 @@ class AuthenticationError extends Error {
 
 const SEARCH_QUERY = `
   query SearchEntities($query: String!, $entities: [String!]!) {
-    search(queryString: $query, entityNames: $entities, page: { index: 0, size: 12 }) {
+    search(queryString: $query, entityNames: $entities, page: { index: 0, size: 30 }) {
       total
       hits { id name entity description score }
     }
@@ -44,6 +47,22 @@ const TARGET_EVIDENCE_QUERY = `
           score
           datatypeScores { id score }
           datasourceScores { id score }
+        }
+      }
+    }
+  }
+`;
+
+const TARGET_ASSOCIATED_DISEASES_QUERY = `
+  query TargetAssociatedDiseases($targetId: String!) {
+    target(ensemblId: $targetId) {
+      id
+      approvedSymbol
+      associatedDiseases(page: { index: 0, size: 200 }, enableIndirect: false) {
+        count
+        rows {
+          disease { id name }
+          score
         }
       }
     }
@@ -95,6 +114,13 @@ function handledInfrastructureError(error) {
     return apiError(error.code, error.message, 401);
   }
   if (error instanceof PersistenceError) {
+    console.error("axiom persistence failure", {
+      operation: error.operation ?? "unknown",
+      upstreamStatus: error.status ?? null,
+      message: error.message,
+      causeName: error.cause?.name ?? null,
+      causeCode: error.cause?.code ?? null,
+    });
     if (error.status === 401 || error.status === 403) {
       return apiError("invalid_session", "Your Supabase session is invalid, expired, or not authorized", 401);
     }
@@ -182,16 +208,54 @@ async function openTargets(transport, query, variables) {
 
 async function searchEntities(transport, query, entity) {
   const data = await openTargets(transport, SEARCH_QUERY, { query, entities: [entity] });
+  const items = (data.search?.hits ?? []).map((hit) => ({
+    id: hit.id,
+    label: hit.name,
+    entityType: hit.entity,
+    description: hit.description ?? null,
+    searchRankScore: hit.score ?? null,
+    scoreNote: "Open Targets search relevance score; not scientific confidence.",
+  }));
   return {
+    query,
+    source: "Open Targets Platform",
+    catalogScope: "full_index",
+    matchFields: entity === "disease" ? ["preferred name", "synonym", "description", "ontology identifier"] : ["approved symbol", "approved name", "description", "identifier"],
     total: data.search?.total ?? 0,
-    items: (data.search?.hits ?? []).map((hit) => ({
-      id: hit.id,
-      label: hit.name,
-      entityType: hit.entity,
-      description: hit.description ?? null,
-      searchRankScore: hit.score ?? null,
-      scoreNote: "Open Targets search relevance score; not scientific confidence.",
-    })),
+    returned: items.length,
+    pageSize: ENTITY_SEARCH_PAGE_SIZE,
+    items,
+  };
+}
+
+async function searchTargetDiseases(transport, targetId, query = "") {
+  const data = await openTargets(transport, TARGET_ASSOCIATED_DISEASES_QUERY, { targetId });
+  if (!data.target) return null;
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const rows = (data.target.associatedDiseases?.rows ?? []).filter((row) => row.disease?.id && row.disease?.name);
+  const matches = normalizedQuery
+    ? rows.filter((row) => [row.disease?.name, row.disease?.id].some((value) => value?.toLocaleLowerCase().includes(normalizedQuery)))
+    : rows;
+  const items = matches.slice(0, ENTITY_SEARCH_PAGE_SIZE).map((row) => ({
+    id: row.disease.id,
+    label: row.disease.name,
+    entityType: "disease",
+    description: `Ranked disease association for ${data.target.approvedSymbol ?? targetId}`,
+    associationScore: row.score ?? null,
+    searchRankScore: row.score ?? null,
+    scoreNote: "Open Targets association ranking signal; not scientific confidence.",
+  }));
+  return {
+    query,
+    target: { id: data.target.id, label: data.target.approvedSymbol ?? data.target.id },
+    source: "Open Targets Platform",
+    catalogScope: "target_associations",
+    associationTotal: data.target.associatedDiseases?.count ?? rows.length,
+    associationsLoaded: rows.length,
+    total: matches.length,
+    returned: items.length,
+    pageSize: ENTITY_SEARCH_PAGE_SIZE,
+    items,
   };
 }
 
@@ -384,7 +448,7 @@ function lexicalRetrieve(run, query, topK) {
   ];
   if (!results.length) warnings.push("No candidate contained a query term.");
   const citedResults = results.filter((result) => result.citations?.length).length;
-  return {
+  return normalizeRetrievalOutcome({
     query,
     retrievalMode: "lexical_rank_v1",
     generated: false,
@@ -392,17 +456,35 @@ function lexicalRetrieve(run, query, topK) {
     embedding: null,
     workflow: [
       { step: "planner", label: "Query planner", status: "completed" },
-      { step: "lexical_retriever", label: "Lexical retriever", status: "completed" },
-      { step: "citation_guard", label: "Citation guard", status: "completed" },
+      { step: "lexical_retriever", label: "Lexical retriever", status: results.length ? "completed" : "empty" },
+      { step: "citation_guard", label: "Citation guard", status: results.length ? "completed" : "not_evaluated" },
     ],
     results,
     citationAudit: {
-      status: citedResults === results.length ? "passed" : "incomplete",
-      coverage: results.length ? citedResults / results.length : 1,
+      status: results.length ? (citedResults === results.length ? "passed" : "incomplete") : "not_evaluated",
+      coverage: results.length ? citedResults / results.length : null,
       citedResults,
       totalResults: results.length,
     },
     warnings,
+  });
+}
+
+function normalizeRetrievalOutcome(value) {
+  if (!value || typeof value !== "object" || !Array.isArray(value.results) || value.results.length) return value;
+  return {
+    ...value,
+    workflow: Array.isArray(value.workflow) ? value.workflow.map((step) => step?.step === "citation_guard"
+      ? { ...step, status: "not_evaluated" }
+      : step?.step?.includes("retriever") ? { ...step, status: "empty" } : step) : value.workflow,
+    citationAudit: {
+      ...(value.citationAudit ?? {}),
+      status: "not_evaluated",
+      coverage: null,
+      citedResults: 0,
+      totalResults: 0,
+      complete: null,
+    },
   };
 }
 
@@ -410,21 +492,47 @@ function createStage(id, label, service, status, extra = {}) {
   return { id, label, service, status, ...extra };
 }
 
-function unavailableStages() {
-  return [
-    createStage("docking", "Docking validation", "No worker configured", "not_configured", {
-      evidenceKind: "computational_prediction",
-      reason: "Install and register an open-source docking worker before this stage can run.",
-    }),
-    createStage("safety", "ADMET and toxicity", "No worker configured", "not_configured", {
-      evidenceKind: "computational_prediction",
-      reason: "Install and register ADMET-AI before this stage can run.",
-    }),
-    createStage("synthesis", "Retrosynthesis", "No worker configured", "not_configured", {
-      evidenceKind: "computational_prediction",
-      reason: "Install and register AiZynthFinder before this stage can run.",
-    }),
-  ];
+function validationStages(env = {}) {
+  const stageIds = { admet: "safety", retrosynthesis: "synthesis" };
+  const evidenceKinds = {
+    molecule_prep: "structure_standardization",
+    docking: "computational_prediction",
+    admet: "computational_prediction",
+    retrosynthesis: "computational_prediction",
+  };
+  const configuredReasons = {
+    molecule_prep: "RDKit molecule preparation is available in the Validation workbench. Attach a candidate structure to make it part of this evidence run.",
+    docking: "Meeko ligand and Vina-manifest preparation is available in the Validation workbench. Pose scoring still requires a compatible Vina engine and prepared receptor.",
+    admet: "Local ADMET-AI prediction is available in the Validation workbench. Results are model predictions, not measured safety data.",
+    retrosynthesis: "RDKit BRICS fragment analysis is available in the Validation workbench. Full route search still requires AiZynthFinder policies and stock data.",
+  };
+  const configuredServices = {
+    molecule_prep: "RDKit",
+    docking: "RDKit + Meeko · input preparation only",
+    admet: "RDKit + ADMET-AI",
+    retrosynthesis: "RDKit BRICS · fragment analysis",
+  };
+
+  return VALIDATION_WORKERS.map((worker) => {
+    const endpoint = typeof env?.[worker.envKey] === "string" ? env[worker.envKey].trim() : "";
+    return createStage(
+      stageIds[worker.id] ?? worker.id,
+      worker.label,
+      endpoint ? configuredServices[worker.id] : "No worker configured",
+      endpoint ? "available_local" : "not_configured",
+      {
+        evidenceKind: evidenceKinds[worker.id],
+        reason: endpoint
+          ? configuredReasons[worker.id]
+          : `Set ${worker.envKey} to register this worker.`,
+      },
+    );
+  });
+}
+
+function applyValidationPlan(run, env = {}) {
+  run.validationPlan = buildValidationPlan(run, env);
+  return run;
 }
 
 function ragIndexStage(durable) {
@@ -468,7 +576,7 @@ function initialRagState(durable) {
   };
 }
 
-async function persistAndIndexRun(run, repository) {
+async function persistAndIndexRun(run, repository, env = {}) {
   run.stages = Array.isArray(run.stages) ? run.stages : [];
   run.warnings = Array.isArray(run.warnings) ? run.warnings : [];
   run.capabilities = run.capabilities && typeof run.capabilities === "object"
@@ -484,7 +592,7 @@ async function persistAndIndexRun(run, repository) {
   if (!repository.persistence.durable) {
     run.capabilities.hybridRetrieval = false;
     run.capabilities.openSourceEmbeddings = false;
-    return repository.put(run);
+    return repository.put(applyValidationPlan(run, env));
   }
 
   const normalized = await buildNormalizedRunPayload(run);
@@ -497,6 +605,21 @@ async function persistAndIndexRun(run, repository) {
   await repository.ingest(run, normalized.payload);
 
   const stage = run.stages.find((item) => item.id === "rag_index");
+  if (normalized.counts.chunks === 0) {
+    run.rag = {
+      ...run.rag,
+      status: "empty",
+      mode: null,
+      counts: { ...run.rag.counts, embeddedChunks: 0 },
+      fallbackReason: "No evidence or literature documents were returned, so no retrieval index could be created.",
+    };
+    Object.assign(stage, { status: "empty", itemCount: 0, totalChunks: 0, evidenceKind: "retrieval_index" });
+    run.capabilities.hybridRetrieval = false;
+    run.capabilities.openSourceEmbeddings = false;
+    run.warnings.push("The RAG index is empty because this run contains no source documents.");
+    run.updatedAt = new Date().toISOString();
+    return repository.put(applyValidationPlan(run, env));
+  }
   try {
     const indexSummary = await repository.index(run.id);
     const embeddedChunks = Number(
@@ -542,10 +665,10 @@ async function persistAndIndexRun(run, repository) {
     run.warnings.push("Hybrid indexing did not complete. Retrieval will use the normalized Postgres lexical index until indexing succeeds.");
   }
   run.updatedAt = new Date().toISOString();
-  return repository.put(run);
+  return repository.put(applyValidationPlan(run, env));
 }
 
-async function createRun(transport, input, appEnv, repository) {
+async function createRun(transport, input, env, repository) {
   const ownership = await repository.prepare();
   const createdAt = new Date().toISOString();
   const id = crypto.randomUUID();
@@ -626,6 +749,7 @@ async function createRun(transport, input, appEnv, repository) {
       };
       stages[stages.length - 1].itemCount = evidence.items.length;
       stages[stages.length - 1].totalEvidenceCount = evidence.count;
+      if (!evidence.items.length) warnings.push("Open Targets returned no direct evidence records for this target–disease pair.");
     } catch (error) {
       warnings.push(`Open Targets pair-evidence retrieval failed: ${error.message}`);
     }
@@ -652,20 +776,22 @@ async function createRun(transport, input, appEnv, repository) {
       license: "Europe PMC terms; article-level reuse varies",
       query: literatureQuery,
     });
+    if (!literature.items.length) warnings.push("Europe PMC returned no literature records for this run's target–disease query.");
   } catch (error) {
     stages.push(createStage("literature", "Literature retrieval", "Europe PMC", "failed", { error: error.message }));
     warnings.push(`Europe PMC retrieval failed: ${error.message}`);
   }
 
-  stages.push(ragIndexStage(repository.persistence.durable), ...unavailableStages());
+  stages.push(ragIndexStage(repository.persistence.durable), ...validationStages(env));
   const completedSources = stages.filter((stage) => stage.status === "completed").length;
+  const returnedSourceRecords = (evidence?.items?.length ?? 0) + (literature?.items?.length ?? 0);
   const run = {
     schemaVersion: RUN_SCHEMA_VERSION,
     id,
-    status: completedSources === 2 ? "evidence_ready" : completedSources ? "partial" : "failed",
+    status: completedSources === 2 && returnedSourceRecords > 0 ? "evidence_ready" : completedSources ? "partial" : "failed",
     createdAt,
     updatedAt: new Date().toISOString(),
-    environment: appEnv ?? "production",
+    environment: env.APP_ENV ?? "production",
     persistence: repository.persistence,
     ...(ownership ?? {}),
     target: {
@@ -687,15 +813,13 @@ async function createRun(transport, input, appEnv, repository) {
       retrieval: true,
       hybridRetrieval: false,
       openSourceEmbeddings: false,
-      docking: false,
-      admet: false,
-      retrosynthesis: false,
+      ...validationCapabilities(env),
       generation: false,
     },
     rag: initialRagState(repository.persistence.durable),
     warnings,
   };
-  return persistAndIndexRun(run, repository);
+  return persistAndIndexRun(applyValidationPlan(run, env), repository, env);
 }
 
 function validateRunInput(value) {
@@ -738,9 +862,7 @@ async function handleApi(request, env = {}) {
         retrieval: true,
         hybridRetrieval: hybridConfigured,
         openSourceEmbeddings: hybridConfigured,
-        docking: false,
-        admet: false,
-        retrosynthesis: false,
+        ...validationCapabilities(env),
         generation: false,
       },
       rag: {
@@ -751,6 +873,20 @@ async function handleApi(request, env = {}) {
         generated: false,
       },
     });
+  }
+
+  const targetDiseasesMatch = url.pathname.match(/^\/api\/targets\/([^/]+)\/diseases$/);
+  if (targetDiseasesMatch && request.method === "GET") {
+    const targetId = decodeURIComponent(targetDiseasesMatch[1]);
+    const query = url.searchParams.get("q")?.trim() ?? "";
+    if (targetId.length < 3 || targetId.length > 80) return apiError("invalid_target", "A valid target identifier is required", 400);
+    try {
+      const result = await searchTargetDiseases(transport, targetId, query);
+      if (!result) return apiError("target_not_found", "Target was not found in Open Targets", 404);
+      return json(result);
+    } catch (error) {
+      return apiError("upstream_unavailable", error.message, 502, { source: "Open Targets" });
+    }
   }
 
   if (["/api/targets/search", "/api/diseases/search"].includes(url.pathname) && request.method === "GET") {
@@ -764,6 +900,71 @@ async function handleApi(request, env = {}) {
     }
   }
 
+  const runCampaignsMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/campaigns$/);
+  if (runCampaignsMatch && ["GET", "POST"].includes(request.method)) {
+    try {
+      const principal = await authenticateSupabaseRequest(request, env);
+      const campaigns = createCampaignRepository(env, principal);
+      if (request.method === "GET") return json({ items: await campaigns.list(runCampaignsMatch[1]) });
+      let input;
+      try { input = await request.json(); } catch { return apiError("invalid_json", "Request body must be valid JSON", 400); }
+      if (!input || typeof input.name !== "string" || input.name.trim().length < 1 || input.name.trim().length > 160) {
+        return apiError("invalid_input", "Campaign name must contain between 1 and 160 characters", 400);
+      }
+      return json(await campaigns.create(runCampaignsMatch[1], input), 201);
+    } catch (error) {
+      const handled = handledInfrastructureError(error);
+      if (handled) return handled;
+      throw error;
+    }
+  }
+
+  const campaignCandidatesMatch = url.pathname.match(/^\/api\/campaigns\/([^/]+)\/candidates$/);
+  if (campaignCandidatesMatch && request.method === "POST") {
+    let input;
+    try { input = await request.json(); } catch { return apiError("invalid_json", "Request body must be valid JSON", 400); }
+    if (!input || typeof input.name !== "string" || !input.name.trim() || typeof input.smiles !== "string" || !input.smiles.trim()) {
+      return apiError("invalid_input", "Candidate name and SMILES are required", 400);
+    }
+    try {
+      const principal = await authenticateSupabaseRequest(request, env);
+      return json(await createCampaignRepository(env, principal).addCandidate(campaignCandidatesMatch[1], input), 201);
+    } catch (error) {
+      const handled = handledInfrastructureError(error);
+      if (handled) return handled;
+      throw error;
+    }
+  }
+
+  const candidateQueueMatch = url.pathname.match(/^\/api\/candidates\/([^/]+)\/queue$/);
+  if (candidateQueueMatch && request.method === "POST") {
+    try {
+      const principal = await authenticateSupabaseRequest(request, env);
+      return json({ jobs: await createCampaignRepository(env, principal).queueCandidate(candidateQueueMatch[1]) }, 202);
+    } catch (error) {
+      const handled = handledInfrastructureError(error);
+      if (handled) return handled;
+      throw error;
+    }
+  }
+
+  const candidateReviewMatch = url.pathname.match(/^\/api\/candidates\/([^/]+)\/reviews$/);
+  if (candidateReviewMatch && request.method === "POST") {
+    let input;
+    try { input = await request.json(); } catch { return apiError("invalid_json", "Request body must be valid JSON", 400); }
+    if (!input || !["advance", "hold", "reject"].includes(input.decision) || typeof input.rationale !== "string" || input.rationale.trim().length < 3) {
+      return apiError("invalid_input", "A review decision and rationale of at least 3 characters are required", 400);
+    }
+    try {
+      const principal = await authenticateSupabaseRequest(request, env);
+      return json(await createCampaignRepository(env, principal).reviewCandidate(candidateReviewMatch[1], input), 201);
+    } catch (error) {
+      const handled = handledInfrastructureError(error);
+      if (handled) return handled;
+      throw error;
+    }
+  }
+
   if (url.pathname === "/api/runs" && request.method === "POST") {
     let input;
     try { input = await request.json(); } catch { return apiError("invalid_json", "Request body must be valid JSON", 400); }
@@ -771,7 +972,7 @@ async function handleApi(request, env = {}) {
     if (validationError) return apiError("invalid_input", validationError, 400);
     try {
       const repository = await repositoryForRequest(request, env, baseRepository);
-      const run = await createRun(transport, input, env.APP_ENV, repository);
+      const run = await createRun(transport, input, env, repository);
       return json(run, 201, { location: `/api/runs/${run.id}` });
     } catch (error) {
       const handled = handledInfrastructureError(error);
@@ -803,10 +1004,15 @@ async function handleApi(request, env = {}) {
     const validationError = validateRetrievalInput(input);
     if (validationError) return apiError("invalid_input", validationError, 400);
     const query = input.query.trim();
+    const reportedChunks = run.rag?.counts?.chunks;
+    const sourceRecordCount = (run.evidence?.items?.length ?? 0) + (run.literature?.items?.length ?? 0);
+    if (reportedChunks !== undefined && reportedChunks !== null && Number(reportedChunks) === 0 && sourceRecordCount === 0) {
+      return apiError("empty_retrieval_corpus", "This evidence run contains no indexed source chunks. Create a run with returned evidence or literature before retrieving passages.", 409);
+    }
     if (repository.persistence.durable) {
       try {
-        if (run.rag?.status !== "completed") run = await persistAndIndexRun(run, repository);
-        return json(await repository.retrieve(run.id, query, input.topK ?? 5));
+        if (run.rag?.status !== "completed") run = await persistAndIndexRun(run, repository, env);
+        return json(normalizeRetrievalOutcome(await repository.retrieve(run.id, query, input.topK ?? 5)));
       } catch (error) {
         const handled = handledInfrastructureError(error);
         if (handled) return handled;
@@ -814,6 +1020,26 @@ async function handleApi(request, env = {}) {
       }
     }
     return json(lexicalRetrieve(run, query, input.topK ?? 5));
+  }
+
+  const validationPlanMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/validation-plan$/);
+  if (validationPlanMatch && request.method === "GET") {
+    let run;
+    try {
+      const repository = await repositoryForRequest(request, env, baseRepository);
+      run = await repository.get(validationPlanMatch[1]);
+    } catch (error) {
+      const handled = handledInfrastructureError(error);
+      if (handled) return handled;
+      throw error;
+    }
+    if (!run) {
+      const message = baseRepository.persistence.mode === "ephemeral_memory"
+        ? "Run does not exist or the ephemeral store was reset"
+        : "Run does not exist";
+      return apiError("run_not_found", message, 404);
+    }
+    return json(buildValidationPlan(run, env));
   }
 
   const runMatch = url.pathname.match(/^\/api\/runs\/([^/]+)$/);

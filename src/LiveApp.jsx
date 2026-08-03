@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  ArrowClockwise, ArrowLeft, ArrowSquareOut, CheckCircle, CloudCheck, Database,
+  ArrowClockwise, ArrowLeft, ArrowSquareOut, Atom, ChartLineUp, CheckCircle, CloudCheck, Cube, Database,
   DownloadSimple, EnvelopeSimple, Flask, GoogleLogo, Key, LockKey, MagnifyingGlass,
-  Play, ShieldWarning, SignOut, Sparkle, UserCircle, Warning, X,
+  Play, ShieldWarning, SignOut, Sparkle, TestTube, UserCircle, Warning, X,
 } from "@phosphor-icons/react";
 import { api } from "./api.js";
 import {
@@ -16,7 +16,7 @@ import {
 import { supabase, supabaseBrowserConfigured, supabaseGoogleConfigured } from "./supabase.js";
 
 const SAVED_RUN_KEY = "axiom:last-evidence-run";
-const RUN_TABS = ["Research", "Index", "Evidence", "Literature", "Provenance", "Capabilities"];
+const RUN_TABS = ["Research", "Campaign", "Index", "Validation", "Evidence", "Literature", "Provenance", "Capabilities"];
 const INDEX_COUNTS = [
   ["sources", "Sources"],
   ["evidenceRecords", "Evidence records"],
@@ -72,28 +72,37 @@ function retrievalMode(value) {
 
 function statusTone(status) {
   const value = String(status ?? "").toLowerCase();
-  if (["completed", "complete", "available", "connected", "configured", "enabled", "ok", "passed", "ready", "success"].includes(value)) return "available";
-  if (["degraded", "fallback", "partial", "warning"].includes(value)) return "degraded";
-  if (["running", "active", "in_progress", "processing"].includes(value)) return "active";
+  if (["completed", "complete", "succeeded", "available", "available_local", "available_for_run", "data_available", "connected", "configured", "enabled", "ok", "passed", "ready", "success", "advanced", "route_ready"].includes(value)) return "available";
+  if (["degraded", "fallback", "partial", "warning", "blocked", "held", "needs_review", "empty", "empty_for_run", "blocked_no_index", "preparation_only", "fragment_analysis_only", "not_evaluated"].includes(value)) return "degraded";
+  if (["running", "active", "in_progress", "processing", "queued", "leased", "evaluating"].includes(value)) return "active";
   return "unavailable";
 }
 
 function StageCard({ stage, selected, onClick }) {
-  const status = stage.status ?? "unknown";
-  const itemSummary = present(stage.itemCount) ? `${stage.itemCount} retrieved records` : "Item count unavailable";
+  const isEmpty = stage.status === "completed" && Number(stage.itemCount) === 0;
+  const status = isEmpty ? "empty" : stage.status ?? "unknown";
+  const itemLabel = stage.id === "rag_index" ? "indexed chunks" : "records returned";
+  const itemSummary = present(stage.itemCount) ? `${stage.itemCount} ${itemLabel}` : "Item count unavailable";
+  const reason = isEmpty ? (stage.id === "rag_index" ? "No evidence documents were available to index." : "The upstream request completed, but returned no records for this run.") : stage.reason;
   return <button type="button" className={`live-stage live-${status} ${selected ? "is-selected" : ""}`} onClick={onClick} aria-pressed={selected}>
     <div className="live-stage-head"><span>{stage.id === "evidence" || stage.id === "rag_index" ? <Database/> : stage.id === "literature" ? <MagnifyingGlass/> : <Flask/>}</span><strong>{stage.label || humanize(stage.id) || "Unnamed stage"}</strong><i>{humanize(status)}</i></div>
     <h3>{stage.service || "Service unavailable"}</h3>
-    <p>{stage.reason ?? itemSummary}</p>
+    <p>{reason ?? itemSummary}</p>
     <span className="live-stage-foot">{stage.evidenceKind ? humanize(stage.evidenceKind) : "Stage metadata unavailable"}</span>
   </button>;
 }
 
-function SearchField({ label, placeholder, value, onChange, onSearch, searching, items, selected, onSelect }) {
+function SearchField({ label, placeholder, value, onChange, onSearch, searching, items, selected, onSelect, searchMeta, hint, disabled = false }) {
+  const searched = Boolean(searchMeta) && searchMeta.query === value.trim();
+  const resultSummary = searchMeta?.catalogScope === "target_associations"
+    ? `${searchMeta.total.toLocaleString()} matching among ${searchMeta.associationsLoaded.toLocaleString()} loaded · ${searchMeta.associationTotal.toLocaleString()} total target-linked`
+    : `${searchMeta?.total?.toLocaleString() ?? 0} catalogue matches`;
   return <div className="live-search-field">
-    <label>{label}</label>
-    <div className="live-search-box"><MagnifyingGlass/><input value={value} onChange={(event)=>onChange(event.target.value)} onKeyDown={(event)=>event.key === "Enter" && onSearch()} placeholder={placeholder}/><button onClick={onSearch} disabled={searching || value.trim().length < 2}>{searching ? "Searching…" : "Search"}</button></div>
+    <label>{label}</label><small className="live-search-hint">{hint}</small>
+    <div className={`live-search-box ${disabled?"is-disabled":""}`}><MagnifyingGlass/><input value={value} onChange={(event)=>onChange(event.target.value)} onKeyDown={(event)=>{if(event.key === "Enter"){event.preventDefault();onSearch();}}} placeholder={placeholder} autoComplete="off" disabled={disabled}/><button type="button" onClick={onSearch} disabled={disabled || searching || value.trim().length < 2}>{searching ? "Searching…" : "Search"}</button></div>
     {items.length > 0 && <div className="live-results">{items.map(item=><button className={selected?.id===item.id?"is-selected":""} key={item.id} onClick={()=>onSelect(item)}><span><strong>{item.label}</strong><small>{item.description || item.entityType}</small></span><code>{item.id}</code></button>)}</div>}
+    {searched && !searching && items.length===0 && <div className="live-search-empty">No matching catalogue entries. Try a common name, synonym, or ontology identifier.</div>}
+    {searched && items.length>0 && <div className="live-search-meta"><span>{resultSummary} · showing {items.length}</span><small>{searchMeta.source}</small></div>}
     {selected && <div className="live-selection"><CheckCircle weight="fill"/><span><strong>{selected.label}</strong><small>{selected.id}</small></span></div>}
   </div>;
 }
@@ -226,23 +235,44 @@ function Setup({ health, onRun, user, onSignOut }) {
   const [targetQuery,setTargetQuery]=useState("TNIK");
   const [diseaseQuery,setDiseaseQuery]=useState("idiopathic pulmonary fibrosis");
   const [targets,setTargets]=useState([]); const [diseases,setDiseases]=useState([]);
+  const [targetSearch,setTargetSearch]=useState(null); const [diseaseSearch,setDiseaseSearch]=useState(null);
   const [target,setTarget]=useState(null); const [disease,setDisease]=useState(null);
-  const [loading,setLoading]=useState(""); const [error,setError]=useState("");
+  const [loading,setLoading]=useState({}); const [error,setError]=useState("");
+  const searchSequence=useRef({target:0,disease:0});
   const persistence=persistenceState(health?.persistence);
-  const search = async(type) => {
-    const isTarget=type==="target"; setLoading(type); setError("");
-    try { const data=await (isTarget?api.searchTargets(targetQuery):api.searchDiseases(diseaseQuery)); isTarget?setTargets(data.items??[]):setDiseases(data.items??[]); }
-    catch(e){setError(e.message);} finally{setLoading("");}
+  const validationPreview = [
+    ["Molecule prep", "molecule_prep", "RDKit worker registered", "RDKit worker not configured"],
+    ["Docking", "docking", "Meeko/Vina input preparation registered", "Docking worker not configured"],
+    ["ADMET/toxicity", "admet", "ADMET-AI worker registered", "ADMET-AI worker not configured"],
+    ["Retrosynthesis", "retrosynthesis", "BRICS fragment analysis registered", "Retrosynthesis worker not configured"],
+  ];
+  const search = async(type, requestedQuery) => {
+    const isTarget=type==="target"; const query=(requestedQuery??(isTarget?targetQuery:diseaseQuery)).trim();
+    if(query.length<2 && (isTarget || !target))return;
+    const sequence=++searchSequence.current[type]; setLoading(current=>({...current,[type]:true})); setError("");
+    try {
+      const data=await (isTarget?api.searchTargets(query):target?api.searchTargetDiseases(target.id,query):api.searchDiseases(query));
+      if(sequence!==searchSequence.current[type])return;
+      if(isTarget){setTargets(data.items??[]);setTargetSearch(data);}else{setDiseases(data.items??[]);setDiseaseSearch(data);}
+    }
+    catch(e){if(sequence===searchSequence.current[type])setError(e.message);}
+    finally{if(sequence===searchSequence.current[type])setLoading(current=>({...current,[type]:false}));}
   };
+  useEffect(()=>{const query=targetQuery.trim();if(query.length<2){setTargets([]);setTargetSearch(null);return;}const timer=setTimeout(()=>search("target",query),350);return()=>clearTimeout(timer);},[targetQuery]);
+  useEffect(()=>{if(!target){setDiseases([]);setDiseaseSearch(null);return;}const query=diseaseQuery.trim();const timer=setTimeout(()=>search("disease",query),query.length?250:0);return()=>clearTimeout(timer);},[diseaseQuery,target?.id]);
   return <section className="live-setup">
     <div className="live-setup-copy"><span className="live-kicker"><Sparkle weight="fill"/> Evidence run</span><h1>Start with identifiers,<br/>not assumptions.</h1><p>Resolve a therapeutic target and disease against Open Targets, then retrieve direct evidence and literature with source-level provenance.</p><div className="live-health"><i className={health?.status==="ok"?"ok":""}/><span>{health?.status==="ok"?"Evidence API connected":health?.status==="degraded"?"Evidence API needs configuration":"Checking evidence API…"}</span><small>{!health?"Confirming persistence configuration…":health.status==="degraded"?"Supabase configuration is incomplete; durable reads and writes are unavailable.":persistence.durable?"Supabase Postgres is configured for durable evidence runs.":"Local memory fallback is active; configure Supabase to make runs durable."}</small></div></div>
     <div className="live-setup-form">
       {user&&<div className="live-session"><UserCircle/><span><small>Authenticated workspace</small><strong>{user.email}</strong></span><button onClick={onSignOut}><SignOut/> Sign out</button></div>}
-      <SearchField label="01 · Therapeutic target" placeholder="Gene symbol or target name" value={targetQuery} onChange={(value)=>{setTargetQuery(value);setTarget(null);setTargets([]);}} onSearch={()=>search("target")} searching={loading==="target"} items={targets} selected={target} onSelect={setTarget}/>
-      <SearchField label="02 · Disease or phenotype" placeholder="Disease name" value={diseaseQuery} onChange={(value)=>{setDiseaseQuery(value);setDisease(null);setDiseases([]);}} onSearch={()=>search("disease")} searching={loading==="disease"} items={diseases} selected={disease} onSelect={setDisease}/>
+      <SearchField label="01 · Therapeutic target" hint="Search the complete Open Targets index by symbol, name, or Ensembl ID" placeholder="e.g. TNIK, EGFR, ENSG00000146648" value={targetQuery} onChange={(value)=>{setTargetQuery(value);setTarget(null);setDisease(null);setDiseaseQuery("");setTargets([]);setTargetSearch(null);}} onSearch={()=>search("target")} searching={Boolean(loading.target)} items={targets} selected={target} onSelect={(item)=>{setTarget(item);setDisease(null);setDiseaseQuery("");setDiseases([]);setDiseaseSearch(null);}} searchMeta={targetSearch}/>
+      <SearchField label="02 · Disease or phenotype" hint={target?`Showing diseases ranked for ${target.label}. Type to filter this target-specific list.`:"Select a therapeutic target first to load its associated diseases."} placeholder={target?"Filter associated diseases by common name or ontology ID":"Select a target first"} value={diseaseQuery} onChange={(value)=>{setDiseaseQuery(value);setDisease(null);setDiseases([]);setDiseaseSearch(null);}} onSearch={()=>search("disease")} searching={Boolean(loading.disease)} items={diseases} selected={disease} onSelect={setDisease} searchMeta={diseaseSearch} disabled={!target}/>
       {error && <div className="live-error"><Warning/>{error}</div>}
-      <button className="live-primary" disabled={!target||!disease||loading==="run"} onClick={async()=>{setLoading("run");setError("");try{await onRun({targetId:target.id,targetLabel:target.label,diseaseId:disease.id,diseaseLabel:disease.label});}catch(e){setError(e.message);}finally{setLoading("");}}}><Play weight="fill"/>{loading==="run"?"Retrieving live evidence…":"Create evidence run"}</button>
-      <p className="live-honesty">No model output is simulated. Unconfigured computational stages remain visibly unavailable.</p>
+      <button className="live-primary" disabled={!target||!disease||loading.run} onClick={async()=>{setLoading(current=>({...current,run:true}));setError("");try{await onRun({targetId:target.id,targetLabel:target.label,diseaseId:disease.id,diseaseLabel:disease.label});}catch(e){setError(e.message);}finally{setLoading(current=>({...current,run:false}));}}}><Play weight="fill"/>{loading.run?"Retrieving live evidence…":"Create evidence run"}</button>
+      <p className="live-honesty">No model output is simulated. Registered local tools stay separate from the production worker and experimental-validation gates.</p>
+      <section className="live-setup-validation" aria-label="Next validation workers">
+        <header><Flask/><span><strong>Open-source validation layer</strong><small>Available in the Validation tab after an evidence run is created.</small></span></header>
+        {validationPreview.map(([label,key,readyDetail,missingDetail])=>{const configured=health?.capabilities?.[key]?.configured===true;return <div key={label}>{configured?<CheckCircle/>:<ShieldWarning/>}<span><strong>{label}</strong><small>{configured?readyDetail:missingDetail}</small></span></div>;})}
+      </section>
     </div>
   </section>;
 }
@@ -289,12 +319,13 @@ function CitationAudit({ audit }) {
   if (!audit || typeof audit !== "object") return <section className="live-citation-audit is-unavailable" aria-label="Citation audit unavailable">
     <ShieldWarning/><span><strong>Citation audit unavailable</strong><small>No citation audit was returned for this retrieval.</small></span><b>—</b>
   </section>;
-  const status = audit.status ?? "unavailable";
+  const emptyAudit = Number(audit.totalResults) === 0;
+  const status = emptyAudit ? "not_evaluated" : audit.status ?? "unavailable";
   const totalsAvailable = present(audit.citedResults) && present(audit.totalResults);
   return <section className={`live-citation-audit is-${statusTone(status)}`} aria-label="Citation audit">
     {statusTone(status) === "available" ? <CheckCircle/> : <ShieldWarning/>}
-    <span><strong>Citation guard · {humanize(status)}</strong><small>{totalsAvailable ? `${audit.citedResults} of ${audit.totalResults} results cited` : "Cited-result totals unavailable"}</small></span>
-    <b>{present(audit.coverage) ? coverageValue(audit.coverage) : "Unavailable"}</b>
+    <span><strong>Citation guard · {humanize(status)}</strong><small>{emptyAudit ? "No results existed to audit." : totalsAvailable ? `${audit.citedResults} of ${audit.totalResults} results cited` : "Cited-result totals unavailable"}</small></span>
+    <b>{emptyAudit ? "—" : present(audit.coverage) ? coverageValue(audit.coverage) : "Unavailable"}</b>
   </section>;
 }
 
@@ -325,11 +356,14 @@ function Research({ run, accessToken }) {
   const indexMode = retrievalMode(run.rag?.mode);
   const responseMode = retrievalMode(retrieval?.retrievalMode ?? retrieval?.mode ?? run.rag?.mode);
   const results = Array.isArray(retrieval?.results) ? retrieval.results : [];
+  const indexedChunks = Number(run.rag?.counts?.chunks ?? 0);
+  const sourceRecords = (run.evidence?.items?.length??0)+(run.literature?.items?.length??0);
+  const hasCorpus = indexedChunks > 0 || sourceRecords > 0;
 
   const submit = async (event) => {
     event.preventDefault();
     const query = question.trim();
-    if (query.length < 3 || loading) return;
+    if (query.length < 3 || loading || !hasCorpus) return;
     setLoading(true);
     setError("");
     try {
@@ -348,10 +382,11 @@ function Research({ run, accessToken }) {
       <div><span className="live-kicker"><MagnifyingGlass/> Grounded retrieval</span><h2>Search within this evidence run</h2><p>Rank passages from the retrieved evidence and literature. Results remain linked to their source records.</p></div>
       <div className="live-no-generation" role="note"><ShieldWarning/><span><strong>No generated scientific answer</strong><small>This stage retrieves passages only. It does not synthesize claims, infer causality, or provide clinical advice.</small></span></div>
     </section>
+    {!hasCorpus&&<div className="live-empty-index" role="status"><ShieldWarning/><span><strong>No indexed evidence is available for this run</strong><small>Open Targets and Europe PMC returned no source records, so there are no passages to retrieve. Create another run with a supported target–disease pair or ingest evidence before searching.</small></span></div>}
     <form className="live-research-form" onSubmit={submit} aria-busy={loading}>
       <label htmlFor="live-research-question">Research question</label>
-      <div><MagnifyingGlass/><input id="live-research-question" value={question} onChange={(event)=>setQuestion(event.target.value)} placeholder="Ask about mechanisms, evidence, or literature" aria-describedby="live-research-help"/><button type="submit" disabled={loading || question.trim().length < 3}>{loading ? "Retrieving…" : "Retrieve passages"}</button></div>
-      <small id="live-research-help">{indexMode.kind === "hybrid" ? "Hybrid retrieval is requested from this run's indexed evidence; the response reports the actual mode used." : indexMode.kind === "lexical" ? "Lexical ranking is available for this run; no vector similarity is implied." : "The API response will report the ranking mode used for this run."}</small>
+      <div><MagnifyingGlass/><input id="live-research-question" value={question} onChange={(event)=>setQuestion(event.target.value)} placeholder="Ask about mechanisms, evidence, or literature" aria-describedby="live-research-help" disabled={!hasCorpus}/><button type="submit" disabled={!hasCorpus||loading || question.trim().length < 3}>{loading ? "Retrieving…" : "Retrieve passages"}</button></div>
+      <small id="live-research-help">{!hasCorpus?"Retrieval is disabled because this run contains zero indexed chunks.":indexMode.kind === "hybrid" ? "Hybrid retrieval is requested from this run's indexed evidence; the response reports the actual mode used." : indexMode.kind === "lexical" ? "Lexical ranking is available for this run; no vector similarity is implied." : "The API response will report the ranking mode used for this run."}</small>
     </form>
     <RetrievalWorkflow retrieval={retrieval} mode={responseMode} waiting={loading}/>
     {error && <div className="live-error" role="alert"><Warning/><span><strong>Retrieval failed</strong><small>{error}</small></span></div>}
@@ -360,12 +395,12 @@ function Research({ run, accessToken }) {
       <header><div><span>{results.length} ranked passages</span><small>{present(retrieval.totalCandidates) ? `${retrieval.totalCandidates} candidates` : "Candidate count unavailable"}{responseMode.raw ? ` · ${humanize(responseMode.raw)}` : ""}</small>{retrieval.embedding && <em>{[retrieval.embedding.model, retrieval.embedding.revision, present(retrieval.embedding.dimensions) ? `${retrieval.embedding.dimensions} dimensions` : null].filter(present).join(" · ") || "Embedding metadata unavailable"}</em>}</div><div className="live-retrieval-badges"><strong className={`live-mode-badge is-${responseMode.kind}`}>{responseMode.label}</strong><strong className={`live-generation-badge ${retrieval.generated === false ? "is-safe" : retrieval.generated === true ? "is-generated" : "is-unavailable"}`}>{retrieval.generated === false ? "Retrieval only" : retrieval.generated === true ? "Generation reported" : "Generation status unavailable"}</strong></div></header>
       <CitationAudit audit={retrieval.citationAudit}/>
       {retrieval.warnings?.map((warning,index)=><p className="live-retrieval-warning" key={`${warning}-${index}`}><Warning/>{warning}</p>)}
-      {results.length === 0 ? <Empty title="No matching passages" detail="Try a more specific target, mechanism, study, or disease phrase."/> : <div className="live-retrieval-list">{results.map((result, index)=><article key={result.id ?? index}>
+      {results.length === 0 ? <Empty title={Number(retrieval.totalCandidates)===0?"No indexed passages were available":"No matching passages"} detail={Number(retrieval.totalCandidates)===0?"This is an empty-corpus result, not a failed or insufficiently specific query.":"Try a more specific target, mechanism, study, or disease phrase."}/> : <div className="live-retrieval-list">{results.map((result, index)=><article key={result.id ?? index}>
         <div className="live-retrieval-rank"><span>Result rank</span><strong>{String(index + 1).padStart(2, "0")}</strong></div>
         <div className="live-retrieval-copy"><div><span>{result.sourceType ? humanize(result.sourceType) : "Source type unavailable"}</span>{result.citations?.slice(0, 3).map((citation,index)=>{const label=typeof citation === "string" ? citation : citation?.id ?? citation?.label; return present(label) ? <code key={`${label}-${index}`}>{label}</code> : null;})}</div><h3>{result.title || "Untitled source record"}</h3><p>{result.excerpt || "No excerpt returned."}</p><ResultScores result={result}/>{result.sourceUrl && <a href={result.sourceUrl} target="_blank" rel="noreferrer">Open source record <ArrowSquareOut/></a>}</div>
       </article>)}</div>}
     </section>}
-    {!loading && !retrieval && <div className="live-research-empty"><Database/><p>Enter a question to retrieve the most relevant grounded passages from this run.</p></div>}
+    {!loading && !retrieval && hasCorpus && <div className="live-research-empty"><Database/><p>Enter a question to retrieve the most relevant grounded passages from this run.</p></div>}
   </div>;
 }
 
@@ -373,7 +408,8 @@ function RagIndex({ run }) {
   const rag = run.rag;
   if (!rag || typeof rag !== "object") return <Empty title="RAG index unavailable" detail="This run did not return normalized index metadata. Retrieval may still report a lexical fallback, but no hybrid index is implied."/>;
   const stage = run.stages?.find((item)=>item.id === "rag_index");
-  const status = rag.status ?? stage?.status ?? "unavailable";
+  const hasChunks = Number(rag.counts?.chunks ?? 0) > 0;
+  const status = !hasChunks && rag.status === "completed" ? "empty" : rag.status ?? stage?.status ?? "unavailable";
   const mode = retrievalMode(rag.mode);
   const normalized = rag.normalized === true ? "Complete" : rag.normalized === false ? "Not complete" : displayValue(rag.normalized);
   return <div className="live-index">
@@ -399,7 +435,7 @@ function RagIndex({ run }) {
       </dl></section>
     </div>
     <section className={`live-index-fallback ${present(rag.fallbackReason) ? "has-reason" : ""}`}>
-      {present(rag.fallbackReason) ? <Warning/> : <ShieldWarning/>}<span><strong>{present(rag.fallbackReason) ? "Retrieval fallback reported" : "Fallback reason unavailable"}</strong><small>{present(rag.fallbackReason) ? rag.fallbackReason : "The run did not report a fallback reason. Check each retrieval response for its actual mode."}</small></span>
+      {!hasChunks?<ShieldWarning/>:present(rag.fallbackReason) ? <Warning/> : <ShieldWarning/>}<span><strong>{!hasChunks?"Index is empty":present(rag.fallbackReason) ? "Retrieval fallback reported" : "Fallback reason unavailable"}</strong><small>{!hasChunks?"No evidence or literature documents were available, so no lexical or vector retrieval can run for this evidence run.":present(rag.fallbackReason) ? rag.fallbackReason : "The run did not report a fallback reason. Check each retrieval response for its actual mode."}</small></span>
     </section>
     <div className="live-index-boundary" role="note"><ShieldWarning/><span><strong>Indexing is not validation</strong><small>Embeddings and rankings organize source passages. They do not establish causality, efficacy, binding, safety, or toxicity.</small></span></div>
   </div>;
@@ -419,7 +455,7 @@ function capabilityState(name, value) {
   if (!present(status) && structured?.configured === false) status = "not_configured";
   status = status ?? "unavailable";
   let tone = statusTone(status);
-  if (structured?.available === false || structured?.configured === false || value === false) tone = "unavailable";
+  if ((structured?.available === false && !explicitStatus) || structured?.configured === false || value === false) tone = "unavailable";
   if (structured?.available === true && tone === "unavailable" && !explicitStatus) tone = "available";
   const reportedDetail = structured?.reason ?? structured?.message ?? structured?.detail;
   const detail = ["string", "number"].includes(typeof reportedDetail) ? String(reportedDetail) : value === true ? "Connected" : value === false ? "Not configured" : "No additional details reported";
@@ -432,7 +468,30 @@ function capabilityState(name, value) {
 }
 
 function Capabilities({run}) {
-  const entries = Object.entries(run.capabilities ?? {});
+  const [chemistry,setChemistry]=useState(null);
+  const [chemistryError,setChemistryError]=useState("");
+  useEffect(()=>{let active=true;api.chemistryHealth().then(value=>{if(active){setChemistry(value);setChemistryError("");}}).catch(error=>{if(active)setChemistryError(error.message);});return()=>{active=false;};},[run.id]);
+  const values={...(run.capabilities??{})};
+  const evidenceCount=run.evidence?.items?.length??run.evidence?.count??0;
+  const literatureCount=run.literature?.items?.length??0;
+  const sourceRecordCount=evidenceCount+literatureCount;
+  const chunkCount=Number(run.rag?.counts?.chunks??0);
+  const sourceState=(label,count,stageId)=>{const failed=run.stages?.find(stage=>stage.id===stageId)?.status==="failed";return {label,status:failed?"failed":count>0?"data_available":"empty_for_run",available:!failed,detail:failed?"The upstream request failed for this run.":count>0?`${count} records were returned for this run.`:"The upstream service responded successfully, but returned no records for this run."};};
+  values.openTargets=sourceState("Open Targets",evidenceCount,"evidence");
+  values.europePmc=sourceState("Europe PMC",literatureCount,"literature");
+  values.retrieval={label:"Retrieval corpus",status:sourceRecordCount>0?"available_for_run":"blocked_no_index",available:sourceRecordCount>0,detail:chunkCount>0?`${chunkCount} indexed chunks are available to retrieve.`:sourceRecordCount>0?`${sourceRecordCount} source records are available for lexical retrieval.`:"This run contains no evidence or literature records, so retrieval is unavailable."};
+  values.hybridRetrieval={label:"Hybrid retrieval",status:chunkCount>0&&run.capabilities?.hybridRetrieval?"available_for_run":"blocked_no_index",available:chunkCount>0&&Boolean(run.capabilities?.hybridRetrieval),detail:chunkCount>0?"Vector and lexical retrieval are available for this run.":"The service may be configured, but this run has no corpus to search."};
+  values.openSourceEmbeddings={label:"Open-source embeddings",status:chunkCount>0&&run.capabilities?.openSourceEmbeddings?"available_for_run":"blocked_no_index",available:chunkCount>0&&Boolean(run.capabilities?.openSourceEmbeddings),detail:chunkCount>0?`${run.rag?.model??"The configured embedding model"} indexed this run.`:"No source chunks existed, so no embeddings were created for this run."};
+  const local=chemistry?.capabilities;
+  if(local){
+    values.molecule_prep={label:"Molecule preparation",status:local.molecule_prep?.available?"available_local":"unavailable",available:Boolean(local.molecule_prep?.available),provider:local.molecule_prep?.provider,model:local.molecule_prep?.version,detail:local.molecule_prep?.available?"RDKit structure preparation is available locally. It has not necessarily run for this evidence run.":local.molecule_prep?.reason??"RDKit is unavailable."};
+    values.admet={label:"ADMET and toxicity",status:local.admet?.available?"available_local":"unavailable",available:Boolean(local.admet?.available),provider:local.admet?.provider,model:local.admet?.version,detail:local.admet?.available?"ADMET-AI prediction is available locally. Outputs are computational predictions, not measured safety data.":local.admet?.reason??"ADMET-AI is unavailable."};
+    values.docking={label:"Docking",status:local.docking?.available?"available_local":local.docking?.preparationAvailable?"preparation_only":"unavailable",available:Boolean(local.docking?.available),provider:local.docking?.provider,model:local.docking?.version,detail:local.docking?.available?"Vina scoring and ligand preparation are available locally.":local.docking?.preparationAvailable?"Meeko ligand preparation is available; Vina pose scoring is unavailable until a compatible binary and prepared receptor are configured.":local.docking?.reason??"Docking is unavailable."};
+    values.retrosynthesis={label:"Retrosynthesis",status:local.retrosynthesis?.available?"route_ready":local.retrosynthesis?.fragmentAnalysisAvailable?"fragment_analysis_only":"unavailable",available:Boolean(local.retrosynthesis?.available),provider:local.retrosynthesis?.available?local.retrosynthesis?.provider:"RDKit BRICS",detail:local.retrosynthesis?.available?"AiZynthFinder route search is configured locally.":local.retrosynthesis?.fragmentAnalysisAvailable?"RDKit BRICS fragment analysis is available; AiZynthFinder route planning still requires policies and stock data.":local.retrosynthesis?.reason??"Retrosynthesis is unavailable."};
+  }else if(chemistryError){
+    for(const key of ["molecule_prep","admet","docking","retrosynthesis"])values[key]={...(typeof values[key]==="object"?values[key]:{}),status:"unavailable",available:false,detail:`Live chemistry health could not be checked: ${chemistryError}`};
+  }
+  const entries = Object.entries(values);
   if (!entries.length) return <Empty title="Capabilities unavailable" detail="This run did not report computational capability states."/>;
   return <div className="live-capabilities">{entries.map(([name,value])=>{
     const capability = capabilityState(name,value);
@@ -445,13 +504,108 @@ function Capabilities({run}) {
   })}</div>;
 }
 
+function ValidationPlan({run, accessToken}) {
+  const [plan,setPlan]=useState(run.validationPlan ?? null);
+  const [chemistry,setChemistry]=useState(null);
+  const [loading,setLoading]=useState(false); const [running,setRunning]=useState("");
+  const [error,setError]=useState("");
+  const [tool,setTool]=useState("Molecule prep");
+  const [smiles,setSmiles]=useState(run.molecule?.canonicalSmiles ?? "CC(=O)Oc1ccccc1C(=O)O");
+  const [policy,setPolicy]=useState({largest_fragment:true,neutralize:true,canonical_tautomer:true,generate_3d:true});
+  const [prepared,setPrepared]=useState(null); const [admet,setAdmet]=useState(null); const [docking,setDocking]=useState(null); const [retro,setRetro]=useState(null);
+  const [dockInput,setDockInput]=useState({receptor_id:run.target?.structure?.pdbId??"",center:{x:0,y:0,z:0},size:{x:22,y:22,z:22},exhaustiveness:8,seed:20260803});
+  const loadPlan=async()=>{
+    setLoading(true);setError("");
+    try {
+      const [nextPlan,nextChemistry]=await Promise.all([api.getValidationPlan(run.id,accessToken),api.chemistryHealth()]);
+      setPlan(nextPlan);setChemistry(nextChemistry);
+    }
+    catch(e){setError(e.message);}
+    finally{setLoading(false);}
+  };
+  useEffect(()=>{loadPlan();},[run.id]);
+  const execute=async(name,action)=>{setRunning(name);setError("");try{return await action();}catch(e){setError(e.message);return null;}finally{setRunning("");}};
+  const prepare=async()=>{const value=await execute("prepare",()=>api.prepareMolecule({smiles,...policy}));if(value){setPrepared(value);setSmiles(value.canonicalSmiles);setAdmet(null);setDocking(null);setRetro(null);}};
+  const predict=async()=>{const value=await execute("admet",()=>api.predictAdmet(prepared?.canonicalSmiles??smiles));if(value)setAdmet(value);};
+  const prepareDocking=async()=>{const value=await execute("docking",()=>api.prepareDocking({...dockInput,smiles:prepared?.canonicalSmiles??smiles}));if(value)setDocking(value);};
+  const fragment=async()=>{const value=await execute("retro",()=>api.fragmentRetrosynthesis(prepared?.canonicalSmiles??smiles));if(value)setRetro(value);};
+  const workers=Array.isArray(plan?.workers)?plan.workers:[];
+  const capabilities=chemistry?.capabilities??{};
+  const toolCards=[
+    ["Molecule prep",Atom,capabilities.molecule_prep?.available?"READY":"BLOCKED",capabilities.molecule_prep?.provider,capabilities.molecule_prep?.version,"Canonicalize, calculate descriptors, screen structural alerts and generate a 3D conformer."],
+    ["ADMET & toxicity",ChartLineUp,capabilities.admet?.available?"READY":"BLOCKED",capabilities.admet?.provider,capabilities.admet?.version,"Run the complete physicochemical, ADME and toxicity panel using local model inference."],
+    ["Docking",Cube,capabilities.docking?.available?"SCORING READY":capabilities.docking?.preparationAvailable?"PREP ONLY":"BLOCKED",capabilities.docking?.provider,capabilities.docking?.version,"Prepare a Meeko ligand and reproducible Vina manifest; scoring waits for a compatible Vina engine."],
+    ["Retrosynthesis",TestTube,capabilities.retrosynthesis?.available?"ROUTE READY":capabilities.retrosynthesis?.fragmentAnalysisAvailable?"BRICS ONLY":"BLOCKED",capabilities.retrosynthesis?.available?capabilities.retrosynthesis?.provider:"RDKit BRICS",capabilities.molecule_prep?.version,"Run rule-based synthetic fragment analysis; AiZynthFinder route search still needs policies and stock data."],
+  ];
+  return <div className="live-validation">
+    <header className="live-validation-header">
+      <div><span className="live-kicker"><Flask/> Computational validation</span><h2>Open-source validation workbench</h2><p>Execute local chemistry tools against a real molecular structure. Every result carries its model, version, method, artifacts and scientific boundary.</p></div>
+      <button type="button" onClick={loadPlan} disabled={loading}><ArrowClockwise/>{loading?"Checking…":"Check workers"}</button>
+    </header>
+    {error&&<div className="live-error"><Warning/>{error}</div>}
+    <section className="live-tool-launcher" aria-label="Chemistry tools">{toolCards.map(([name,Icon,state,provider,version,detail])=><button type="button" className={`${tool===name?"is-selected":""} ${state==="BLOCKED"?"is-blocked":state.includes("ONLY")?"is-partial":"is-available"}`} onClick={()=>setTool(name)} key={name}>
+      <span><Icon/><b>{state}</b></span><strong>{name}</strong><small>{detail}</small><code>{provider??"Unavailable"}{version?` · ${version}`:""}</code>
+    </button>)}</section>
+    <section className="live-chemistry-workbench">
+      <header><span><i className={capabilities.molecule_prep?.available?"is-live":""}/>{chemistry?.status==="ok"?"Local chemistry worker connected":"Chemistry worker unavailable"}</span><code>{prepared?.structureHash?.slice(0,16)??"No prepared structure"}</code></header>
+      {tool==="Molecule prep"&&<div className="live-chem-tool">
+        <section className="live-chem-input"><label>Candidate structure · SMILES</label><textarea value={smiles} onChange={event=>setSmiles(event.target.value)} spellCheck="false"/><div className="live-chem-policies">{Object.entries({largest_fragment:"Largest fragment",neutralize:"Neutralize",canonical_tautomer:"Canonical tautomer",generate_3d:"Generate 3D"}).map(([key,label])=><label key={key}><input type="checkbox" checked={policy[key]} onChange={event=>setPolicy(current=>({...current,[key]:event.target.checked}))}/>{label}</label>)}</div><button className="live-primary-action" onClick={prepare} disabled={!capabilities.molecule_prep?.available||!smiles.trim()||running}><Play/>{running==="prepare"?"Running RDKit…":"Prepare with RDKit"}</button><p>Example loaded: aspirin. Replace it with any valid SMILES.</p></section>
+        <section className="live-chem-output">{prepared?<><div className="live-molecule-render" dangerouslySetInnerHTML={{__html:prepared.svg}}/><div className="live-canonical"><label>Canonical SMILES</label><code>{prepared.canonicalSmiles}</code><small>{prepared.inchiKey}</small></div><div className="live-descriptors">{Object.entries(prepared.descriptors??{}).map(([name,value])=><div key={name}><span>{humanize(name)}</span><strong>{typeof value==="number"?Number(value).toFixed(3):value}</strong></div>)}</div><div className={`live-alert-summary ${prepared.structuralAlerts?.length?"has-alerts":""}`}><strong>{prepared.structuralAlerts?.length??0} structural alerts</strong><span>{prepared.drugLikeness?.passes?"Lipinski screen passed":"Lipinski review required"}</span></div><p className="live-boundary">{prepared.boundary}</p></>:<Empty title="No prepared molecule" detail="Run RDKit to validate and standardize the candidate structure."/>}</section>
+      </div>}
+      {tool==="ADMET & toxicity"&&<div className="live-chem-tool"><section className="live-chem-input"><label>Prediction input</label><code className="live-input-code">{prepared?.canonicalSmiles??smiles}</code><button className="live-primary-action" onClick={predict} disabled={!capabilities.admet?.available||!smiles.trim()||running}><Play/>{running==="admet"?"Running endpoint panel…":"Run ADMET-AI"}</button><p>First inference loads the model ensembles and can take several seconds. Outputs are predictions, never measured results.</p></section><section className="live-chem-output">{admet?<><div className="live-admet-header"><span><strong>{admet.endpoints?.length} endpoints</strong><small>{admet.provenance?.provider} {admet.provenance?.version} · {admet.provenance?.durationMs} ms</small></span><b>COMPUTATIONAL PREDICTION</b></div><div className="live-admet-grid">{admet.highlights?.map(item=><article key={item.id}><span>{item.category}</span><strong>{item.name}</strong><b>{Number(item.value).toFixed(3)}{item.units&&item.units!=="-"?` ${item.units}`:""}</b><small>{item.interpretation}</small></article>)}</div><details className="live-endpoint-details"><summary>View all {admet.endpoints?.length} endpoints</summary><div>{admet.endpoints?.map(item=><p key={item.id}><span>{item.name}</span><code>{Number(item.value).toFixed(4)} {item.units&&item.units!=="-"?item.units:""}</code></p>)}</div></details><p className="live-boundary">{admet.boundary}</p></>:<Empty title="No ADMET inference" detail="Run ADMET-AI to calculate the complete local prediction panel."/>}</section></div>}
+      {tool==="Docking"&&<div className="live-chem-tool"><section className="live-chem-input"><label>Receptor and search box</label><input placeholder="PDB ID or prepared receptor ID" value={dockInput.receptor_id} onChange={event=>setDockInput(current=>({...current,receptor_id:event.target.value}))}/><div className="live-vector-inputs"><span>Center</span>{["x","y","z"].map(axis=><input key={`c${axis}`} aria-label={`Center ${axis}`} type="number" value={dockInput.center[axis]} onChange={event=>setDockInput(current=>({...current,center:{...current.center,[axis]:Number(event.target.value)}}))}/>)}</div><div className="live-vector-inputs"><span>Size Å</span>{["x","y","z"].map(axis=><input key={`s${axis}`} aria-label={`Size ${axis}`} type="number" value={dockInput.size[axis]} onChange={event=>setDockInput(current=>({...current,size:{...current.size,[axis]:Number(event.target.value)}}))}/>)}</div><button className="live-primary-action" onClick={prepareDocking} disabled={!capabilities.docking?.preparationAvailable||!dockInput.receptor_id.trim()||!smiles.trim()||running}><Cube/>{running==="docking"?"Preparing ligand…":"Prepare docking package"}</button><p>Creates a Meeko PDBQT ligand and deterministic Vina configuration. A compatible Vina engine is still required for pose scoring.</p></section><section className="live-chem-output">{docking?<><div className="live-docking-state"><CheckCircle/><span><strong>Docking package prepared</strong><small>{docking.status.replaceAll("_"," ")}</small></span></div><dl className="live-config-list">{Object.entries(docking.config??{}).map(([name,value])=><div key={name}><dt>{humanize(name)}</dt><dd>{typeof value==="object"?JSON.stringify(value):value}</dd></div>)}</dl><p className="live-boundary">{docking.boundary}</p></>:<Empty title="No docking package" detail="Enter a receptor ID and explicit pocket box to prepare reproducible docking inputs."/>}</section></div>}
+      {tool==="Retrosynthesis"&&<div className="live-chem-tool"><section className="live-chem-input"><label>Product structure</label><code className="live-input-code">{prepared?.canonicalSmiles??smiles}</code><button className="live-primary-action" onClick={fragment} disabled={!capabilities.retrosynthesis?.fragmentAnalysisAvailable||!smiles.trim()||running}><TestTube/>{running==="retro"?"Applying BRICS rules…":"Analyze synthetic fragments"}</button><p>RDKit BRICS is available now. Full route search remains gated on a separately versioned AiZynthFinder policy and purchasable-stock database.</p></section><section className="live-chem-output">{retro?<><div className="live-fragments">{retro.fragments?.map((item,index)=><article key={`${item.smiles}-${index}`}><i>{String(index+1).padStart(2,"0")}</i><code>{item.smiles}</code><span>{item.heavyAtoms} heavy atoms</span></article>)}</div><p className="live-boundary">{retro.boundary}</p></>:<Empty title="No fragment analysis" detail="Run BRICS decomposition to identify rule-based candidate disconnections."/>}</section></div>}
+    </section>
+    <details className="live-readiness-details"><summary>Worker contracts and remaining scientific gates</summary><div className="live-validation-workers">{workers.map(worker=>{const live=capabilities[worker.id];const liveStatus=live?.available?"available_local":worker.id==="docking"&&live?.preparationAvailable?"preparation_only":worker.id==="retrosynthesis"&&live?.fragmentAnalysisAvailable?"fragment_analysis_only":worker.status;return <article key={worker.id} className={statusTone(liveStatus)==="available"?"is-configured":"is-blocked"}><header><span><Flask/><strong>{worker.label}</strong></span><b>{humanize(liveStatus)}</b></header><p>{worker.outputBoundary}</p><dl><div><dt>Toolchain</dt><dd>{worker.toolchain?.join(" + ")}</dd></div><div><dt>Artifacts</dt><dd>{worker.expectedArtifacts?.slice(0,3).join(", ")}</dd></div></dl></article>;})}</div></details>
+  </div>;
+}
+
+const CAMPAIGN_JOBS = ["molecule_prep", "admet", "docking_prepare", "docking_score", "retrosynthesis_fragments", "route_planning"];
+
+function CampaignPanel({run, accessToken}) {
+  const [campaigns,setCampaigns]=useState([]); const [selectedId,setSelectedId]=useState("");
+  const [loading,setLoading]=useState(true); const [busy,setBusy]=useState(""); const [error,setError]=useState("");
+  const [campaignForm,setCampaignForm]=useState({name:`${run.target?.label??"Target"} lead campaign`,objective:"Prioritize candidate structures for scientific review",receptorId:run.target?.structure?.pdbId??"",receptorPath:"",center:{x:0,y:0,z:0},size:{x:22,y:22,z:22},exhaustiveness:8,controlSmiles:""});
+  const [candidateForm,setCandidateForm]=useState({name:"Aspirin reference",smiles:"CC(=O)Oc1ccccc1C(=O)O"});
+  const [reviews,setReviews]=useState({});
+  const load=async(silent=false)=>{if(!silent)setLoading(true);setError("");try{const value=await api.listCampaigns(run.id,accessToken);setCampaigns(value.items??[]);setSelectedId(current=>current||(value.items?.[0]?.id??""));}catch(e){setError(e.message);}finally{if(!silent)setLoading(false);}};
+  useEffect(()=>{load();},[run.id,accessToken]);
+  const hasActiveJobs=campaigns.some(campaign=>campaign.candidates?.some(candidate=>candidate.jobs?.some(job=>["queued","leased","running"].includes(job.status))));
+  useEffect(()=>{if(!hasActiveJobs)return undefined;const timer=setInterval(()=>load(true),2000);return()=>clearInterval(timer);},[hasActiveJobs,run.id,accessToken]);
+  const campaign=campaigns.find(item=>item.id===selectedId)??campaigns[0];
+  const perform=async(key,action)=>{setBusy(key);setError("");try{await action();await load(true);}catch(e){setError(e.message);}finally{setBusy("");}};
+  const create=()=>perform("create",()=>api.createCampaign(run.id,{name:campaignForm.name,objective:campaignForm.objective,settings:{receptorId:campaignForm.receptorId,receptorPath:campaignForm.receptorPath,center:campaignForm.center,size:campaignForm.size,exhaustiveness:Number(campaignForm.exhaustiveness),seed:20260803,controlSmiles:campaignForm.controlSmiles,maxTransforms:6,routeTimeLimitSeconds:120}},accessToken));
+  const add=()=>perform("add",()=>api.addCampaignCandidate(campaign.id,candidateForm,accessToken));
+  const queue=candidate=>perform(`queue-${candidate.id}`,()=>api.queueCandidate(candidate.id,accessToken));
+  const review=(candidate)=>{const draft=reviews[candidate.id]??{decision:"hold",rationale:""};return perform(`review-${candidate.id}`,()=>api.reviewCandidate(candidate.id,draft,accessToken));};
+  const vector=(field,axis,value)=>setCampaignForm(current=>({...current,[field]:{...current[field],[axis]:Number(value)}}));
+  if(loading)return <div className="live-campaign-loading"><ArrowClockwise/><span>Loading durable campaign state…</span></div>;
+  return <div className="live-campaign">
+    <header className="live-validation-header"><div><span className="live-kicker"><Atom/> Asynchronous discovery campaign</span><h2>Candidate queue and scientific review</h2><p>Ingest structures, run traceable local chemistry jobs, compare transparent prioritization signals, and require a recorded human decision.</p></div><button onClick={()=>load()}><ArrowClockwise/>Refresh state</button></header>
+    {error&&<div className="live-error"><Warning/>{error}</div>}
+    {!campaign?<section className="live-campaign-create"><div><label>Campaign name</label><input value={campaignForm.name} onChange={event=>setCampaignForm(current=>({...current,name:event.target.value}))}/><label>Scientific objective</label><textarea value={campaignForm.objective} onChange={event=>setCampaignForm(current=>({...current,objective:event.target.value}))}/></div><div><label>Prepared receptor ID</label><input placeholder="e.g. 4UN3" value={campaignForm.receptorId} onChange={event=>setCampaignForm(current=>({...current,receptorId:event.target.value}))}/><label>Receptor PDBQT · relative to services/receptors</label><input placeholder="4UN3_prepared.pdbqt" value={campaignForm.receptorPath} onChange={event=>setCampaignForm(current=>({...current,receptorPath:event.target.value}))}/><div className="live-vector-inputs"><span>Center</span>{["x","y","z"].map(axis=><input key={axis} aria-label={`Pocket center ${axis}`} type="number" value={campaignForm.center[axis]} onChange={event=>vector("center",axis,event.target.value)}/>)}</div><div className="live-vector-inputs"><span>Size Å</span>{["x","y","z"].map(axis=><input key={axis} aria-label={`Pocket size ${axis}`} type="number" value={campaignForm.size[axis]} onChange={event=>vector("size",axis,event.target.value)}/>)}</div><label>Known-ligand control SMILES · optional</label><input value={campaignForm.controlSmiles} onChange={event=>setCampaignForm(current=>({...current,controlSmiles:event.target.value}))}/><button className="live-primary-action" onClick={create} disabled={busy||!campaignForm.name.trim()}><Play/>{busy==="create"?"Creating…":"Create durable campaign"}</button></div></section>:
+    <>
+      <section className="live-campaign-command"><div><label>Active campaign</label><select value={campaign.id} onChange={event=>setSelectedId(event.target.value)}>{campaigns.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select><strong>{campaign.objective}</strong><small>{campaign.candidates?.length??0} candidates · Supabase-backed queue</small></div><div><label>Candidate name</label><input value={candidateForm.name} onChange={event=>setCandidateForm(current=>({...current,name:event.target.value}))}/><label>SMILES</label><input className="is-mono" value={candidateForm.smiles} onChange={event=>setCandidateForm(current=>({...current,smiles:event.target.value}))}/><button className="live-primary-action" onClick={add} disabled={busy||!candidateForm.name.trim()||!candidateForm.smiles.trim()}><Atom/>{busy==="add"?"Ingesting…":"Ingest candidate"}</button></div></section>
+      <div className="live-campaign-gate"><ShieldWarning/><span><strong>Real execution, capability-gated</strong><small>RDKit, ADMET-AI and BRICS run locally. Vina scoring and AiZynthFinder route search execute only when their real binaries, receptor, policies and stock inputs are present; otherwise the jobs finish as blocked, never simulated.</small></span></div>
+      {!campaign.candidates?.length?<Empty title="No candidates ingested" detail="Add a named SMILES structure to begin the campaign."/>:<section className="live-candidate-list">{campaign.candidates.map((candidate,index)=>{
+        const jobByType=new Map((candidate.jobs??[]).map(job=>[job.job_type,job])); const reviewDraft=reviews[candidate.id]??{decision:"hold",rationale:""};
+        return <article className="live-candidate" key={candidate.id}><header><i>{String(index+1).padStart(2,"0")}</i><div><strong>{candidate.name}</strong><code>{candidate.canonical_smiles??candidate.input_smiles}</code></div><span><b>{candidate.rank_score==null?"—":Number(candidate.rank_score).toFixed(1)}</b><small>priority / 100</small></span><em className={`is-${statusTone(candidate.status)}`}>{humanize(candidate.status)}</em></header>
+          <div className="live-job-track">{CAMPAIGN_JOBS.map(type=>{const job=jobByType.get(type);return <div className={`is-${statusTone(job?.status)}`} key={type}><span/><strong>{humanize(type)}</strong><small>{humanize(job?.status??"not queued")}</small></div>;})}</div>
+          <div className="live-candidate-body"><section><label>Model and method boundaries</label>{candidate.evaluations?.length?<div className="live-evaluations">{candidate.evaluations.map(item=><details key={item.id}><summary><span>{humanize(item.evaluation_type)}</span><b className={`is-${statusTone(item.status)}`}>{humanize(item.status)}</b></summary><p>{item.boundary}</p><dl><div><dt>Applicability</dt><dd>{humanize(item.applicability?.status??"not assessed")}</dd></div><div><dt>Ranking method</dt><dd>{item.score_component?.method??"Excluded from ranking"}</dd></div></dl></details>)}</div>:<p className="live-muted">No worker results yet.</p>}<button className="live-secondary-action" onClick={()=>queue(candidate)} disabled={busy||["queued","evaluating"].includes(candidate.status)}><Play/>{busy===`queue-${candidate.id}`?"Queueing…":candidate.jobs?.length?"Requeue blocked or failed jobs":"Queue six chemistry jobs"}</button></section>
+          <section className="live-review"><label>Human scientific review</label><select value={reviewDraft.decision} onChange={event=>setReviews(current=>({...current,[candidate.id]:{...reviewDraft,decision:event.target.value}}))}><option value="advance">Advance</option><option value="hold">Hold</option><option value="reject">Reject</option></select><textarea placeholder="Record the scientific rationale and unresolved risks…" value={reviewDraft.rationale} onChange={event=>setReviews(current=>({...current,[candidate.id]:{...reviewDraft,rationale:event.target.value}}))}/><button className="live-primary-action" onClick={()=>review(candidate)} disabled={busy||reviewDraft.rationale.trim().length<3}><CheckCircle/>{busy===`review-${candidate.id}`?"Recording…":"Record decision"}</button>{candidate.reviews?.map(item=><div className="live-review-record" key={item.id}><b>{humanize(item.decision)}</b><p>{item.rationale}</p><small>{new Date(item.created_at).toLocaleString()}</small></div>)}</section></div>
+        </article>;})}</section>}
+    </>}
+  </div>;
+}
+
 function Empty({title,detail}) { return <div className="live-empty"><Database/><h3>{title}</h3><p>{detail}</p></div>; }
 
 function RunView({run,onNewRun,user,onSignOut,accessToken}) {
   const [tab,setTab]=useState("Research"); const [selectedStage,setSelectedStage]=useState(run.stages?.[0]?.id);
   const score=run.association?.associationScore;
+  const blockers=run.stages?.filter(stage=>stage.status==="not_configured")??[];
   const persistence=persistenceState(run.persistence);
-  const selectStage=(stage)=>{setSelectedStage(stage.id);const destination={rag_index:"Index",evidence:"Evidence",literature:"Literature"}[stage.id];if(destination)setTab(destination);};
+  const selectStage=(stage)=>{setSelectedStage(stage.id);const destination={rag_index:"Index",evidence:"Evidence",literature:"Literature",molecule_prep:"Validation",docking:"Validation",safety:"Validation",synthesis:"Validation"}[stage.id];if(destination)setTab(destination);};
   const onTabKeyDown=(event,name)=>{
     const current=RUN_TABS.indexOf(name);
     let next=current;
@@ -462,14 +616,14 @@ function RunView({run,onNewRun,user,onSignOut,accessToken}) {
     else return;
     event.preventDefault();setTab(RUN_TABS[next]);event.currentTarget.parentElement?.querySelectorAll('[role="tab"]')?.[next]?.focus();
   };
-  const panel=tab==="Research"?<Research run={run} accessToken={accessToken}/>:tab==="Index"?<RagIndex run={run}/>:tab==="Evidence"?<EvidenceTable run={run}/>:tab==="Literature"?<Literature run={run}/>:tab==="Provenance"?<Provenance run={run}/>:<Capabilities run={run}/>;
+  const panel=tab==="Research"?<Research run={run} accessToken={accessToken}/>:tab==="Campaign"?<CampaignPanel run={run} accessToken={accessToken}/>:tab==="Index"?<RagIndex run={run}/>:tab==="Validation"?<ValidationPlan run={run} accessToken={accessToken}/>:tab==="Evidence"?<EvidenceTable run={run}/>:tab==="Literature"?<Literature run={run}/>:tab==="Provenance"?<Provenance run={run}/>:<Capabilities run={run}/>;
   const download=()=>{const blob=new Blob([JSON.stringify(run,null,2)],{type:"application/json"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=`axiom-run-${run.id}.json`;a.click();URL.revokeObjectURL(url);};
   return <div className="live-run">
     <header className="live-header"><div className="live-brand"><Sparkle weight="fill"/><strong>Axiom Observatory</strong><span>REAL DATA</span></div><div className="live-run-id"><code>{run.id}</code><b>{run.status?.replaceAll("_"," ")}</b></div><div><button onClick={download}><DownloadSimple/> Export run</button><button onClick={onNewRun}><ArrowClockwise/> New run</button>{user&&<button title={user.email} onClick={onSignOut}><SignOut/> Sign out</button>}</div></header>
     <aside className="live-context"><label>Target context</label><h1>{run.target?.label}</h1><p>{run.target?.name||run.target?.id}</p><code>{run.target?.id}</code><hr/><h4>Disease</h4><h2>{run.disease?.label}</h2><code>{run.disease?.id}</code><hr/><h4>Evidence boundary</h4><p>This run retrieves and organizes evidence. It does not validate causality, binding, toxicity, or efficacy.</p><div className={`live-persistence ${persistence.durable?"is-durable":""}`}>{persistence.durable?<CloudCheck/>:<Warning/>}<span><strong>{persistence.durable?"Durable Supabase run":"Ephemeral run store"}</strong><small>{persistence.durable?"The versioned run snapshot is persisted in Supabase Postgres.":"Only the run ID is retained in this browser; the server record resets on restart."}</small></span></div></aside>
-    <section className="live-workspace"><div className="live-workspace-title"><span>Evidence pipeline</span><small>Created {new Date(run.createdAt).toLocaleString()}</small></div><div className="live-stages">{run.stages?.map(stage=><StageCard key={stage.id} stage={stage} selected={stage.id===selectedStage} onClick={()=>selectStage(stage)}/>)}</div><div className="live-inspector"><nav aria-label="Run workspace" role="tablist">{RUN_TABS.map(name=>{const slug=name.toLowerCase();return <button type="button" role="tab" id={`live-tab-${slug}`} aria-controls={`live-panel-${slug}`} aria-selected={tab===name} tabIndex={tab===name?0:-1} className={tab===name?"is-active":""} onClick={()=>setTab(name)} onKeyDown={(event)=>onTabKeyDown(event,name)} key={name}>{name}{name==="Index"&&present(run.rag?.counts?.chunks)&&<span>{run.rag.counts.chunks}</span>}{name==="Evidence"&&<span>{run.evidence?.count??0}</span>}{name==="Literature"&&<span>{run.literature?.hitCount??0}</span>}</button>;})}</nav><div className="live-inspector-body" role="tabpanel" id={`live-panel-${tab.toLowerCase()}`} aria-labelledby={`live-tab-${tab.toLowerCase()}`} tabIndex={0}>{panel}</div></div></section>
-    <aside className="live-decision"><label>Scientific judge</label><section className="live-score"><span>Association score</span><strong>{score==null?"—":Number(score).toFixed(3)}</strong><p>Upstream Open Targets ranking signal. It is not a confidence probability.</p></section><section><label>Direct evidence</label><h3>{run.evidence?.count??0} records</h3><p>{run.evidence?.pageNote}</p></section><section><label>Computational blockers</label>{run.stages?.filter(stage=>stage.status==="not_configured").map(stage=><div className="live-blocker" key={stage.id}><ShieldWarning/><span><strong>{stage.label}</strong><small>{stage.reason}</small></span></div>)}</section>{run.warnings?.length>0&&<section><label>Run warnings</label>{run.warnings.map(w=><p className="live-warning" key={w}>{w}</p>)}</section>}</aside>
-    <footer className="live-footer"><span><i/> Evidence sources connected</span><span>Schema {run.schemaVersion}</span><span>Predictions are unavailable until validated workers are installed.</span><span>Open-source core · v0.4</span></footer>
+    <section className="live-workspace"><div className="live-workspace-title"><span>Evidence pipeline</span><small>Created {new Date(run.createdAt).toLocaleString()}</small></div><div className="live-stages">{run.stages?.map(stage=><StageCard key={stage.id} stage={stage} selected={stage.id===selectedStage} onClick={()=>selectStage(stage)}/>)}</div><div className="live-inspector"><nav aria-label="Run workspace" role="tablist">{RUN_TABS.map(name=>{const slug=name.toLowerCase();return <button type="button" role="tab" id={`live-tab-${slug}`} aria-controls={`live-panel-${slug}`} aria-selected={tab===name} tabIndex={tab===name?0:-1} className={tab===name?"is-active":""} onClick={()=>setTab(name)} onKeyDown={(event)=>onTabKeyDown(event,name)} key={name}>{name}{name==="Index"&&present(run.rag?.counts?.chunks)&&<span>{run.rag.counts.chunks}</span>}{name==="Validation"&&<span>{run.validationPlan?.workers?.length??4}</span>}{name==="Evidence"&&<span>{run.evidence?.count??0}</span>}{name==="Literature"&&<span>{run.literature?.hitCount??0}</span>}</button>;})}</nav><div className="live-inspector-body" role="tabpanel" id={`live-panel-${tab.toLowerCase()}`} aria-labelledby={`live-tab-${tab.toLowerCase()}`} tabIndex={0}>{panel}</div></div></section>
+    <aside className="live-decision"><label>Scientific judge</label><section className="live-score"><span>Association score</span><strong>{score==null?"—":Number(score).toFixed(3)}</strong><p>{score==null?"No direct target–disease association was found in the queried Open Targets results.":"Upstream Open Targets ranking signal. It is not a confidence probability."}</p></section><section><label>Direct evidence</label><h3>{run.evidence?.count??0} records</h3><p>{(run.evidence?.count??0)===0?"The upstream pair query completed successfully but returned no direct evidence records.":run.evidence?.pageNote}</p></section>{blockers.length>0&&<section><label>Computational blockers</label>{blockers.map(stage=><div className="live-blocker" key={stage.id}><ShieldWarning/><span><strong>{stage.label}</strong><small>{stage.reason}</small></span></div>)}</section>}{run.warnings?.length>0&&<section><label>Run warnings</label>{run.warnings.map(w=><p className="live-warning" key={w}>{w}</p>)}</section>}</aside>
+    <footer className="live-footer"><span><i/> Evidence sources connected</span><span>Schema {run.schemaVersion}</span><span>Local computational results remain explicitly labeled and provenance-linked.</span><span>Open-source core · v0.4</span></footer>
   </div>;
 }
 

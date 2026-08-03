@@ -93,6 +93,7 @@ test("emits the files required by Sites packaging", async () => {
   await access(new URL("../dist/server/run-repository.js", import.meta.url));
   await access(new URL("../dist/server/embedding-client.js", import.meta.url));
   await access(new URL("../dist/server/rag-pipeline.js", import.meta.url));
+  await access(new URL("../dist/server/validation-plan.js", import.meta.url));
   await access(new URL("../dist/.openai/hosting.json", import.meta.url));
 
   const builtWorker = (await import(`../dist/server/index.js?verify=${Date.now()}`)).default;
