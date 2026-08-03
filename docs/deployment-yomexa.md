@@ -7,7 +7,7 @@ The initial production POC is packaged as one Docker service containing the publ
 1. Sign in to Render and create a Blueprint from the GitHub repository.
 2. Render will detect `render.yaml` and build `deploy/Dockerfile`.
 3. Supply these secret values when prompted:
-   - `SUPABASE_URL`
+   - `SUPABASE_URL` — the project API origin, `https://wmctadhdehnlqzltffun.supabase.co`; never paste a `supabase.com/dashboard/...` URL
    - `SUPABASE_SERVICE_ROLE_KEY`
    - `VITE_SUPABASE_URL`
    - `VITE_SUPABASE_PUBLISHABLE_KEY`

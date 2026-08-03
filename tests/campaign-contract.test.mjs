@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { boundedWorkerError, normalizeSupabaseProjectUrl } from "../scripts/campaign-config.mjs";
 
 const runner = await readFile(new URL("../scripts/campaign-worker.mjs", import.meta.url), "utf8");
 const repository = await readFile(new URL("../worker/campaign-repository.js", import.meta.url), "utf8");
@@ -20,6 +21,15 @@ test("local campaign worker executes the complete queued workflow without placeh
   assert.match(runner, /No docking engine executed; no poses, affinities, redocking control, or binding claims exist/i);
   assert.match(runner, /No AiZynthFinder policy search executed/i);
   assert.match(runner, /excluded from ranking until a calibrated endpoint-specific domain registry/i);
+});
+
+test("campaign worker accepts project origins and rejects Supabase dashboard URLs", () => {
+  assert.equal(normalizeSupabaseProjectUrl("https://wmctadhdehnlqzltffun.supabase.co/"), "https://wmctadhdehnlqzltffun.supabase.co");
+  assert.equal(normalizeSupabaseProjectUrl("http://127.0.0.1:54321"), "http://127.0.0.1:54321");
+  assert.throws(() => normalizeSupabaseProjectUrl("https://supabase.com/dashboard/project/example"), /points to the Supabase Dashboard/);
+  assert.throws(() => normalizeSupabaseProjectUrl("https://example.supabase.co/rest/v1"), /project API origin/);
+  assert.match(boundedWorkerError(new Error("<!DOCTYPE html><html>not found</html>")), /HTML page instead of its JSON API/);
+  assert.ok(boundedWorkerError(new Error("x".repeat(800))).length <= 500);
 });
 
 test("campaign API requires an authenticated principal and delegates writes to scoped RPCs", () => {
