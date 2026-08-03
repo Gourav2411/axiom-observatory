@@ -9,11 +9,11 @@ services:
       - axiom.yomexa.xyz
     envVars:
       - key: SUPABASE_URL
-        sync: false
+        value: https://wmctadhdehnlqzltffun.supabase.co
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
       - key: VITE_SUPABASE_URL
-        sync: false
+        value: https://wmctadhdehnlqzltffun.supabase.co
       - key: VITE_SUPABASE_PUBLISHABLE_KEY
         sync: false
       - key: VITE_SUPABASE_GOOGLE_ENABLED
