@@ -23,6 +23,26 @@ class AuthenticationError extends Error {
   }
 }
 
+async function dispatchGithubChemistry(env, transport = globalThis.fetch) {
+  const token = env.GITHUB_ACTIONS_TOKEN?.trim();
+  const repository = env.GITHUB_ACTIONS_REPOSITORY?.trim();
+  if (!token || !repository) return { status: "scheduled_fallback", reason: "GitHub Actions dispatch credentials are not configured." };
+  const response = await transport(`https://api.github.com/repos/${repository}/actions/workflows/chemistry-compute.yml/dispatches`, {
+    method: "POST",
+    headers: {
+      accept: "application/vnd.github+json",
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "x-github-api-version": "2026-03-10",
+      "user-agent": "axiom-observatory",
+    },
+    body: JSON.stringify({ ref: env.GITHUB_ACTIONS_REF || "main" }),
+    signal: AbortSignal.timeout(12_000),
+  });
+  if (!response.ok) return { status: "scheduled_fallback", reason: `Immediate GitHub Actions dispatch returned HTTP ${response.status}.` };
+  return { status: "dispatched", workflow: "chemistry-compute.yml" };
+}
+
 const SEARCH_QUERY = `
   query SearchEntities($query: String!, $entities: [String!]!) {
     search(queryString: $query, entityNames: $entities, page: { index: 0, size: 30 }) {
@@ -493,6 +513,8 @@ function createStage(id, label, service, status, extra = {}) {
 }
 
 function validationStages(env = {}) {
+  const scoredDocking = env.AXIOM_DOCKING_EXECUTION_MODE === "vina_scoring";
+  const batchChemistry = env.AXIOM_HEAVY_COMPUTE_MODE === "github_actions";
   const stageIds = { admet: "safety", retrosynthesis: "synthesis" };
   const evidenceKinds = {
     molecule_prep: "structure_standardization",
@@ -502,14 +524,18 @@ function validationStages(env = {}) {
   };
   const configuredReasons = {
     molecule_prep: "RDKit molecule preparation is available in the Validation workbench. Attach a candidate structure to make it part of this evidence run.",
-    docking: "Meeko ligand and Vina-manifest preparation is available in the Validation workbench. Pose scoring still requires a compatible Vina engine and prepared receptor.",
-    admet: "Local ADMET-AI prediction is available in the Validation workbench. Results are model predictions, not measured safety data.",
+    docking: batchChemistry
+      ? "AutoDock Vina scoring is queued in batched GitHub Actions compute after receptor and pocket controls are supplied."
+      : scoredDocking
+      ? "Private AutoDock Vina scoring is available after a prepared receptor and explicit pocket controls are supplied."
+      : "Meeko ligand and Vina-manifest preparation is available in the Validation workbench. Pose scoring still requires a compatible Vina engine and prepared receptor.",
+    admet: batchChemistry ? "ADMET-AI inference is queued in batched GitHub Actions compute. Results are model predictions, not measured safety data." : "Local ADMET-AI prediction is available in the Validation workbench. Results are model predictions, not measured safety data.",
     retrosynthesis: "RDKit BRICS fragment analysis is available in the Validation workbench. Full route search still requires AiZynthFinder policies and stock data.",
   };
   const configuredServices = {
     molecule_prep: "RDKit",
-    docking: "RDKit + Meeko · input preparation only",
-    admet: "RDKit + ADMET-AI",
+    docking: batchChemistry ? "RDKit + Meeko + AutoDock Vina · GitHub Actions batch" : scoredDocking ? "RDKit + Meeko + AutoDock Vina · private compute" : "RDKit + Meeko · input preparation only",
+    admet: batchChemistry ? "RDKit + ADMET-AI · GitHub Actions batch" : "RDKit + ADMET-AI",
     retrosynthesis: "RDKit BRICS · fragment analysis",
   };
 
@@ -519,7 +545,7 @@ function validationStages(env = {}) {
       stageIds[worker.id] ?? worker.id,
       worker.label,
       endpoint ? configuredServices[worker.id] : "No worker configured",
-      endpoint ? "available_local" : "not_configured",
+      batchChemistry && ["docking", "admet"].includes(worker.id) ? "available_async" : endpoint ? "available_local" : "not_configured",
       {
         evidenceKind: evidenceKinds[worker.id],
         reason: endpoint
@@ -940,7 +966,10 @@ async function handleApi(request, env = {}) {
   if (candidateQueueMatch && request.method === "POST") {
     try {
       const principal = await authenticateSupabaseRequest(request, env);
-      return json({ jobs: await createCampaignRepository(env, principal).queueCandidate(candidateQueueMatch[1]) }, 202);
+      const jobs = await createCampaignRepository(env, principal).queueCandidate(candidateQueueMatch[1]);
+      const heavyQueued = jobs.some((job) => ["admet", "docking_score"].includes(job.job_type));
+      const compute = heavyQueued ? await dispatchGithubChemistry(env, env.UPSTREAM_FETCH ?? globalThis.fetch) : { status: "not_required" };
+      return json({ jobs, compute }, 202);
     } catch (error) {
       const handled = handledInfrastructureError(error);
       if (handled) return handled;

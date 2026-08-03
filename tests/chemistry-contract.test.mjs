@@ -14,6 +14,7 @@ test("local chemistry worker exposes real preparation and prediction boundaries"
   assert.match(service, /RDKit ETKDGv3 \+ MMFF94/);
   assert.match(service, /@app\.post\("\/applicability\/admet"\)/);
   assert.match(service, /axiom-admet-domain-registry\.v1/);
+  assert.match(service, /ADMET-AI execution is disabled on this resource-constrained web service/i);
 });
 
 test("docking and retrosynthesis paths cannot fabricate engine outputs", () => {
@@ -29,6 +30,14 @@ test("docking and retrosynthesis paths cannot fabricate engine outputs", () => {
   assert.match(service, /affinityStandardDeviation/);
   assert.match(service, /receptorSha256/);
   assert.match(service, /not RMSD redocking validation/i);
+});
+
+test("private chemistry worker authenticates calls and transfers reproducible artifacts", () => {
+  assert.match(service, /AXIOM_INTERNAL_WORKER_KEY/);
+  assert.match(service, /hmac\.compare_digest/);
+  assert.match(service, /@app\.get\("\/artifacts\/\{artifact_name\}"\)/);
+  assert.match(service, /@app\.post\("\/receptors"\)/);
+  assert.match(service, /sha256/);
 });
 
 test("frontend exposes every local chemistry operation", () => {

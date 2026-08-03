@@ -1,0 +1,97 @@
+name: Chemistry compute
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 * * * *"
+
+concurrency:
+  group: axiom-chemistry-compute
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    runs-on: ubuntu-slim
+    outputs:
+      has_jobs: ${{ steps.queue.outputs.has_jobs }}
+    steps:
+      - name: Check for queued heavy chemistry
+        id: queue
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$SUPABASE_URL"
+          test -n "$SUPABASE_SERVICE_ROLE_KEY"
+          count="$(curl --fail --silent --show-error \
+            -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+            "$SUPABASE_URL/rest/v1/jobs?status=eq.queued&job_type=in.(admet,docking_score)&select=id&limit=1" | jq 'length')"
+          if [ "$count" -gt 0 ]; then echo "has_jobs=true" >> "$GITHUB_OUTPUT"; else echo "has_jobs=false" >> "$GITHUB_OUTPUT"; fi
+
+  compute:
+    needs: detect
+    if: needs.detect.outputs.has_jobs == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/requirements-admet.txt
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install application dependencies
+        run: npm ci --omit=dev
+      - name: Install chemistry runtime
+        run: pip install --disable-pip-version-check --no-cache-dir -r services/requirements-admet.txt
+      - name: Install verified AutoDock Vina
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 4 --output /tmp/vina https://github.com/ccsb-scripps/AutoDock-Vina/releases/download/v1.2.7/vina_1.2.7_linux_x86_64
+          echo "f31f774f723bba7bbe6e9d1c47577020eea9a8da16424284c043d22593570644  /tmp/vina" | sha256sum --check -
+          sudo install -m 0755 /tmp/vina /usr/local/bin/vina
+          vina --version
+      - name: Run batched ADMET and docking jobs
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          AXIOM_ARTIFACT_SIGNING_KEY: ${{ secrets.AXIOM_ARTIFACT_SIGNING_KEY }}
+          AXIOM_ADMET_EXECUTION_ENABLED: "true"
+          AXIOM_VINA_BINARY: /usr/local/bin/vina
+          AXIOM_CHEMISTRY_URL: http://127.0.0.1:8791
+          AXIOM_CHEMISTRY_HOST: 127.0.0.1
+          AXIOM_CHEMISTRY_PORT: "8791"
+          AXIOM_CAMPAIGN_JOB_TYPES: admet,docking_score
+          AXIOM_CAMPAIGN_ONESHOT: "true"
+          AXIOM_CAMPAIGN_MAX_JOBS: "20"
+          MPLCONFIGDIR: /tmp/axiom-matplotlib
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/axiom-matplotlib services/artifacts services/receptors
+          python services/chemistry_worker.py > /tmp/axiom-chemistry.log 2>&1 &
+          chemistry_pid=$!
+          trap 'kill "$chemistry_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 90); do
+            if curl --fail --silent http://127.0.0.1:8791/health >/dev/null; then break; fi
+            if ! kill -0 "$chemistry_pid" 2>/dev/null; then cat /tmp/axiom-chemistry.log; exit 1; fi
+            sleep 2
+          done
+          curl --fail --silent http://127.0.0.1:8791/health | jq -e '.capabilities.admet.available == true and .capabilities.docking.available == true'
+          node scripts/campaign-worker.mjs
+      - name: Preserve diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: chemistry-failure-${{ github.run_id }}
+          path: /tmp/axiom-chemistry.log
+          retention-days: 3
+          if-no-files-found: ignore

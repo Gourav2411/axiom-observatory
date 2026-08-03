@@ -40,6 +40,8 @@ export const api = {
   prepareMolecule: (input, accessToken) => request("/api/chemistry/prepare", { method: "POST", body: JSON.stringify(input), accessToken }),
   predictAdmet: (smiles, accessToken) => request("/api/chemistry/admet", { method: "POST", body: JSON.stringify({ smiles }), accessToken }),
   prepareDocking: (input, accessToken) => request("/api/chemistry/docking/prepare", { method: "POST", body: JSON.stringify(input), accessToken }),
+  registerReceptor: (input, accessToken) => request("/api/chemistry/receptors", { method: "POST", body: JSON.stringify(input), accessToken }),
+  runDocking: (input, accessToken) => request("/api/chemistry/docking/run", { method: "POST", body: JSON.stringify(input), accessToken }),
   fragmentRetrosynthesis: (smiles, accessToken) => request("/api/chemistry/retrosynthesis/fragments", { method: "POST", body: JSON.stringify({ smiles }), accessToken }),
   retrieveRun: (id, input, accessToken) => request(`/api/runs/${encodeURIComponent(id)}/retrieval`, {
     method: "POST",

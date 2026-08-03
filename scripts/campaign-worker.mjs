@@ -4,13 +4,27 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { loadEnv } from "vite";
+import { boundedWorkerError, normalizeSupabaseProjectUrl } from "./campaign-config.mjs";
 
 const fileEnv = loadEnv(process.env.NODE_ENV || "development", process.cwd(), "");
-const supabaseUrl = process.env.SUPABASE_URL || fileEnv.SUPABASE_URL;
+let configurationError = null;
+let supabaseUrl = "";
+try {
+  supabaseUrl = normalizeSupabaseProjectUrl(process.env.SUPABASE_URL || fileEnv.SUPABASE_URL);
+} catch (error) {
+  configurationError = error;
+}
 const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || fileEnv.SUPABASE_SERVICE_ROLE_KEY;
 const chemistryUrl = (process.env.AXIOM_CHEMISTRY_URL || fileEnv.AXIOM_CHEMISTRY_URL || "http://127.0.0.1:8791").replace(/\/+$/, "");
+const computeHostport = process.env.AXIOM_COMPUTE_HOSTPORT || fileEnv.AXIOM_COMPUTE_HOSTPORT || "";
+const computeUrl = (process.env.AXIOM_COMPUTE_URL || fileEnv.AXIOM_COMPUTE_URL || (computeHostport ? `http://${computeHostport}` : "")).replace(/\/+$/, "");
+const internalWorkerKey = process.env.AXIOM_INTERNAL_WORKER_KEY || fileEnv.AXIOM_INTERNAL_WORKER_KEY || "";
 const workerId = `local-campaign-${randomUUID()}`;
 const pollMs = Number(process.env.AXIOM_CAMPAIGN_POLL_MS || 2_000);
+const allowedJobTypes = (process.env.AXIOM_CAMPAIGN_JOB_TYPES || fileEnv.AXIOM_CAMPAIGN_JOB_TYPES || "molecule_prep,admet,docking_prepare,docking_score,retrosynthesis_fragments,route_planning")
+  .split(",").map((value) => value.trim()).filter(Boolean);
+const oneShot = /^(1|true|yes)$/i.test(process.env.AXIOM_CAMPAIGN_ONESHOT || "");
+const maxJobs = Math.max(1, Math.min(Number(process.env.AXIOM_CAMPAIGN_MAX_JOBS || 20), 100));
 const artifactSigningKey = process.env.AXIOM_ARTIFACT_SIGNING_KEY || fileEnv.AXIOM_ARTIFACT_SIGNING_KEY || "";
 const supabase = supabaseUrl && serviceRoleKey
   ? createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false, autoRefreshToken: false } })
@@ -58,18 +72,30 @@ async function registerArtifact(job, bytes, fileName, mimeType, metadata) {
 
 async function persistOutcomeArtifacts(job, outcome) {
   const artifactRoot = path.resolve(process.cwd(), "services/artifacts");
+  const remoteArtifactOrigin = ["admet", "docking_score"].includes(job.job_type) ? computeUrl : "";
   const files = [];
   for (const relativePath of collectLocalArtifacts(outcome.result)) {
     const absolutePath = path.resolve(process.cwd(), relativePath);
     if (!absolutePath.startsWith(`${artifactRoot}${path.sep}`)) throw new Error("Worker artifact escaped the configured artifact root");
-    const bytes = await readFile(absolutePath);
-    const extension = path.extname(absolutePath).toLowerCase();
+    let bytes;
+    if (remoteArtifactOrigin) {
+      const response = await fetch(`${remoteArtifactOrigin}/artifacts/${encodeURIComponent(path.basename(relativePath))}`, {
+        headers: internalWorkerKey ? { "x-axiom-worker-key": internalWorkerKey } : {},
+        signal: AbortSignal.timeout(60_000),
+      });
+      if (!response.ok) throw new Error(`Remote chemistry artifact returned HTTP ${response.status}`);
+      bytes = Buffer.from(await response.arrayBuffer());
+    } else {
+      bytes = await readFile(absolutePath);
+    }
+    const extension = path.extname(relativePath).toLowerCase();
     const mimeType = extension === ".json" ? "application/json" : extension === ".sdf" ? "chemical/x-mdl-sdfile" : extension === ".pdbqt" ? "chemical/x-pdbqt" : "application/octet-stream";
     files.push(await registerArtifact(job, bytes, path.basename(absolutePath), mimeType, {
       schemaVersion: "axiom-artifact.v1",
       jobType: job.job_type,
       workerId,
-      localSourcePath: relativePath,
+      workerSourcePath: relativePath,
+      transfer: remoteArtifactOrigin ? "authenticated_private_http" : "local_filesystem",
     }));
   }
   const manifest = {
@@ -120,9 +146,10 @@ async function executeWithHeartbeat(job) {
 }
 
 async function chemistry(path, body) {
-  const response = await fetch(`${chemistryUrl}${path}`, {
+  const origin = computeUrl && ["/admet", "/applicability/admet", "/receptors", "/docking/run"].includes(path) ? computeUrl : chemistryUrl;
+  const response = await fetch(`${origin}${path}`, {
     method: "POST",
-    headers: { "content-type": "application/json", accept: "application/json" },
+    headers: { "content-type": "application/json", accept: "application/json", ...(origin === computeUrl && internalWorkerKey ? { "x-axiom-worker-key": internalWorkerKey } : {}) },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(10 * 60_000),
   });
@@ -255,31 +282,38 @@ async function complete(job, outcome, error = null) {
 }
 
 async function cycle() {
-  const { data: jobs, error } = await supabase.rpc("lease_campaign_jobs_v1", { p_worker_id: workerId, p_limit: 1, p_lease_seconds: 600 });
+  const { data: jobs, error } = await supabase.rpc("lease_campaign_jobs_v2", { p_worker_id: workerId, p_job_types: allowedJobTypes, p_limit: 1, p_lease_seconds: 600 });
   if (error) throw error;
   for (const job of jobs || []) {
     try {
       const outcome = await executeWithHeartbeat(job);
       await complete(job, await persistOutcomeArtifacts(job, outcome));
     } catch (jobError) {
-      console.error(`Campaign job ${job.job_type} failed:`, jobError.message);
-      await complete(job, null, jobError).catch((completionError) => console.error("Unable to record campaign job failure:", completionError.message));
+      console.error(`Campaign job ${job.job_type} failed:`, boundedWorkerError(jobError));
+      await complete(job, null, jobError).catch((completionError) => console.error("Unable to record campaign job failure:", boundedWorkerError(completionError)));
     }
   }
   return jobs?.length || 0;
 }
 
-if (!supabase) {
+if (configurationError) {
+  console.error("Campaign worker configuration error:", boundedWorkerError(configurationError));
+  process.exitCode = 1;
+} else if (!supabase) {
   console.warn("Campaign worker is disabled because Supabase server credentials are not configured.");
 } else {
-  console.log(`Campaign worker ${workerId} connected.`);
-  while (true) {
+  console.log(`Campaign worker ${workerId} connected for ${allowedJobTypes.join(", ")}.`);
+  let processedTotal = 0;
+  while (!oneShot || processedTotal < maxJobs) {
     try {
       const processed = await cycle();
+      processedTotal += processed;
+      if (oneShot && !processed) break;
       if (!processed) await wait(pollMs);
     } catch (error) {
-      console.error("Campaign worker polling failed:", error.message);
+      console.error("Campaign worker polling failed:", boundedWorkerError(error));
       await wait(Math.max(pollMs, 5_000));
     }
   }
+  if (oneShot) console.log(`Campaign batch completed after ${processedTotal} job(s).`);
 }

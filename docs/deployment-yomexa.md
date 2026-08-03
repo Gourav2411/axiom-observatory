@@ -6,11 +6,12 @@ The initial production POC is packaged as one Docker service containing the publ
 
 1. Sign in to Render and create a Blueprint from the GitHub repository.
 2. Render will detect `render.yaml` and build `deploy/Dockerfile`.
-3. Supply these secret values when prompted:
-   - `SUPABASE_URL`
+3. Supply only these secret values when prompted:
    - `SUPABASE_SERVICE_ROLE_KEY`
-   - `VITE_SUPABASE_URL`
    - `VITE_SUPABASE_PUBLISHABLE_KEY`
+   The public server and browser project URLs are fixed by `render.yaml` to
+   `https://wmctadhdehnlqzltffun.supabase.co`, so a Dashboard URL cannot be
+   entered accidentally.
 4. Use a paid instance with sufficient memory for PyTorch, RDKit, and ADMET-AI. Do not use a sleeping/free web instance for campaign execution.
 5. Wait for `/api/health` to pass. The first image build is large because it pins the scientific Python stack.
 

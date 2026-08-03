@@ -1,0 +1,5 @@
+fastapi==0.141.1
+uvicorn==0.52.1
+rdkit==2025.9.5
+meeko==0.7.1
+gemmi==0.7.5

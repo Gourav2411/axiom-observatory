@@ -14,6 +14,7 @@ const chemistryRoutes = new Set([
   "POST /prepare",
   "POST /admet",
   "POST /applicability/admet",
+  "POST /receptors",
   "POST /docking/prepare",
   "POST /docking/run",
   "POST /retrosynthesis/fragments",
@@ -30,6 +31,25 @@ const mimeTypes = {
   ".svg": "image/svg+xml",
   ".webp": "image/webp",
 };
+
+const cleanOrigin = (value) => value ? value.replace(/\/+$/, "") : "";
+const computeOrigin = () => {
+  const explicit = cleanOrigin(process.env.AXIOM_COMPUTE_URL || "");
+  if (explicit) return explicit;
+  const hostport = cleanOrigin(process.env.AXIOM_COMPUTE_HOSTPORT || "");
+  return hostport ? `http://${hostport}` : "";
+};
+
+function chemistryTarget(targetPath) {
+  const compute = computeOrigin();
+  if (compute && ["/admet", "/applicability/admet", "/receptors", "/docking/run"].includes(targetPath)) return compute;
+  return chemistryUrl;
+}
+
+function internalHeaders(origin) {
+  const key = process.env.AXIOM_INTERNAL_WORKER_KEY || "";
+  return origin === computeOrigin() && key ? { "x-axiom-worker-key": key } : {};
+}
 
 function jsonError(code, message, status) {
   return new Response(JSON.stringify({ error: { code, message } }), {
@@ -74,17 +94,23 @@ async function assetFetch(request) {
 
 function runtimeEnv() {
   const local = chemistryUrl;
+  const compute = computeOrigin();
   return {
     APP_ENV: "production",
     SUPABASE_URL: process.env.SUPABASE_URL,
     SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,
     AXIOM_RDKIT_WORKER_URL: process.env.AXIOM_RDKIT_WORKER_URL || `${local}/prepare`,
-    AXIOM_ADMET_WORKER_URL: process.env.AXIOM_ADMET_WORKER_URL || `${local}/admet`,
-    AXIOM_DOCKING_WORKER_URL: process.env.AXIOM_DOCKING_WORKER_URL || `${local}/docking/prepare`,
+    AXIOM_ADMET_WORKER_URL: process.env.AXIOM_ADMET_WORKER_URL || `${compute || local}/admet`,
+    AXIOM_DOCKING_WORKER_URL: process.env.AXIOM_DOCKING_WORKER_URL || `${compute || local}/${compute ? "docking/run" : "docking/prepare"}`,
+    AXIOM_DOCKING_EXECUTION_MODE: compute ? "vina_scoring" : "preparation_only",
+    AXIOM_HEAVY_COMPUTE_MODE: process.env.AXIOM_HEAVY_COMPUTE_MODE,
     AXIOM_RETROSYNTHESIS_WORKER_URL: process.env.AXIOM_RETROSYNTHESIS_WORKER_URL || `${local}/retrosynthesis/fragments`,
     AXIOM_PBPK_URL: process.env.AXIOM_PBPK_URL,
     AXIOM_POPPK_URL: process.env.AXIOM_POPPK_URL,
     AXIOM_TRIAL_SIMULATION_URL: process.env.AXIOM_TRIAL_SIMULATION_URL,
+    GITHUB_ACTIONS_TOKEN: process.env.GITHUB_ACTIONS_TOKEN,
+    GITHUB_ACTIONS_REPOSITORY: process.env.GITHUB_ACTIONS_REPOSITORY,
+    GITHUB_ACTIONS_REF: process.env.GITHUB_ACTIONS_REF,
     ASSETS: { fetch: assetFetch },
   };
 }
@@ -101,9 +127,42 @@ async function proxyChemistry(request, body) {
     }
   }
   try {
-    return await fetch(`${chemistryUrl}${targetPath}${incoming.search}`, {
+    if (targetPath === "/health" && process.env.AXIOM_HEAVY_COMPUTE_MODE === "github_actions" && !computeOrigin()) {
+      const localResponse = await fetch(`${chemistryUrl}/health`, { signal: AbortSignal.timeout(15_000) });
+      const local = await localResponse.json();
+      return new Response(JSON.stringify({
+        ...local,
+        topology: "web_plus_github_actions_batch",
+        batchCompute: { status: "configured", provider: "GitHub Actions", execution: "asynchronous_batched" },
+        capabilities: {
+          ...local.capabilities,
+          admet: { ...local.capabilities?.admet, batchAvailable: true, batchProvider: "GitHub Actions", reason: "ADMET-AI runs asynchronously in queued campaign batches." },
+          docking: { ...local.capabilities?.docking, batchAvailable: true, batchProvider: "GitHub Actions", reason: "AutoDock Vina scoring runs asynchronously in queued campaign batches when a versioned receptor is available." },
+        },
+      }), { status: 200, headers: { "content-type": "application/json", "cache-control": "no-store" } });
+    }
+    if (targetPath === "/health" && computeOrigin()) {
+      const [localResponse, computeResponse] = await Promise.all([
+        fetch(`${chemistryUrl}/health`, { signal: AbortSignal.timeout(15_000) }),
+        fetch(`${computeOrigin()}/health`, { signal: AbortSignal.timeout(15_000) }).catch(() => null),
+      ]);
+      const local = await localResponse.json();
+      const compute = computeResponse?.ok ? await computeResponse.json() : null;
+      return new Response(JSON.stringify({
+        ...local,
+        topology: "web_plus_private_compute",
+        compute: compute ? { status: compute.status, service: compute.service } : { status: "unavailable" },
+        capabilities: {
+          ...local.capabilities,
+          admet: compute?.capabilities?.admet || local.capabilities?.admet,
+          docking: compute?.capabilities?.docking || local.capabilities?.docking,
+        },
+      }), { status: 200, headers: { "content-type": "application/json", "cache-control": "no-store" } });
+    }
+    const origin = chemistryTarget(targetPath);
+    return await fetch(`${origin}${targetPath}${incoming.search}`, {
       method: request.method,
-      headers: { accept: "application/json", ...(request.headers.get("content-type") ? { "content-type": request.headers.get("content-type") } : {}) },
+      headers: { accept: "application/json", ...(request.headers.get("content-type") ? { "content-type": request.headers.get("content-type") } : {}), ...internalHeaders(origin) },
       body: ["GET", "HEAD"].includes(request.method) ? undefined : body,
       signal: AbortSignal.timeout(15 * 60_000),
     });

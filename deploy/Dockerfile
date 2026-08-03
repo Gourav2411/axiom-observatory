@@ -23,12 +23,18 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     AXIOM_CHEMISTRY_PORT=8791
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgomp1 libstdc++6 \
+    && apt-get install -y --no-install-recommends \
+        libexpat1 \
+        libgomp1 \
+        libsm6 \
+        libstdc++6 \
+        libxext6 \
+        libxrender1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY services/requirements-admet.txt /tmp/requirements-admet.txt
-RUN pip install --no-cache-dir -r /tmp/requirements-admet.txt
+COPY services/requirements-chemistry-base.txt /tmp/requirements-chemistry-base.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-chemistry-base.txt
 COPY --from=web-build /usr/local/bin/node /usr/local/bin/node
 COPY --from=web-build /app /app
 

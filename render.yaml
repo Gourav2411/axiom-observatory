@@ -9,11 +9,11 @@ services:
       - axiom.yomexa.xyz
     envVars:
       - key: SUPABASE_URL
-        sync: false
+        value: https://wmctadhdehnlqzltffun.supabase.co
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
       - key: VITE_SUPABASE_URL
-        sync: false
+        value: https://wmctadhdehnlqzltffun.supabase.co
       - key: VITE_SUPABASE_PUBLISHABLE_KEY
         sync: false
       - key: VITE_SUPABASE_GOOGLE_ENABLED
@@ -22,6 +22,18 @@ services:
         generateValue: true
       - key: AXIOM_CAMPAIGN_POLL_MS
         value: "2000"
+      - key: AXIOM_CAMPAIGN_JOB_TYPES
+        value: molecule_prep,docking_prepare,retrosynthesis_fragments,route_planning
+      - key: AXIOM_HEAVY_COMPUTE_MODE
+        value: github_actions
+      - key: AXIOM_ADMET_EXECUTION_ENABLED
+        value: "false"
+      - key: GITHUB_ACTIONS_REPOSITORY
+        value: Gourav2411/axiom-observatory
+      - key: GITHUB_ACTIONS_REF
+        value: main
+      - key: GITHUB_ACTIONS_TOKEN
+        sync: false
     disk:
       name: axiom-compute-artifacts
       mountPath: /app/services/artifacts
