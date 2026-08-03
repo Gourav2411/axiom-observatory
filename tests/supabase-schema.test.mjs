@@ -179,6 +179,17 @@ test("campaign worker controls and assay ingestion fail closed with tenant bound
   assert.match(assays, /grant execute on function public\.ingest_assay_result_v1\(uuid,jsonb\) to authenticated/i);
 });
 
+test("clinical translation evidence is durable, tenant-scoped, and review-gated", async () => {
+  const sql = await readFile(new URL("../supabase/migrations/20260803140000_clinical_translation_inputs.sql", import.meta.url), "utf8");
+  assert.match(sql, /create table public\.clinical_translation_inputs/i);
+  assert.match(sql, /foreign key \(candidate_id, run_id, workspace_id\)/i);
+  assert.match(sql, /alter table public\.clinical_translation_inputs enable row level security/i);
+  assert.match(sql, /review_status in \('pending', 'qualified', 'rejected'\)/i);
+  assert.match(sql, /create or replace function public\.register_clinical_translation_input_v1/i);
+  assert.match(sql, /create or replace function public\.review_clinical_translation_input_v1/i);
+  assert.match(sql, /public\.can_write_workspace/i);
+});
+
 test("browser environment example keeps Google sign-in disabled by default", async () => {
   const envExample = await readFile(envExampleUrl, "utf8");
   assert.match(envExample, /^VITE_SUPABASE_GOOGLE_ENABLED=false$/m);

@@ -23,9 +23,9 @@ test("local campaign worker executes the complete queued workflow without placeh
 });
 
 test("campaign API requires an authenticated principal and delegates writes to scoped RPCs", () => {
-  for (const path of ["campaigns", "candidates", "queue", "reviews", "assays"]) assert.match(server, new RegExp(path));
+  for (const path of ["campaigns", "candidates", "queue", "reviews", "assays", "translation-inputs"]) assert.match(server, new RegExp(path));
   assert.match(server, /authenticateSupabaseRequest/);
-  for (const rpc of ["create_campaign_v1", "add_campaign_candidate_v1", "queue_candidate_workflow_v1", "submit_scientific_review_v1", "ingest_assay_result_v1"]) {
+  for (const rpc of ["create_campaign_v1", "add_campaign_candidate_v1", "queue_candidate_workflow_v1", "submit_scientific_review_v1", "ingest_assay_result_v1", "register_clinical_translation_input_v1", "review_clinical_translation_input_v1"]) {
     assert.match(repository, new RegExp(rpc));
   }
   assert.doesNotMatch(repository, /authorization: `Bearer \$\{serviceRoleKey\}`/);
@@ -35,5 +35,6 @@ test("clinical translation is a strict readiness audit, never a synthetic trial 
   assert.match(readiness, /blocked_missing_qualified_inputs/);
   assert.match(readiness, /ready_for_pbpk_model_configuration/);
   assert.match(readiness, /ready_for_trial_model_configuration/);
+  assert.match(readiness, /blocked_missing_simulation_engines/);
   assert.match(readiness, /does not simulate exposure, safety, efficacy, dose selection, or a clinical trial/i);
 });

@@ -32,11 +32,13 @@ test("docking and retrosynthesis paths cannot fabricate engine outputs", () => {
 });
 
 test("frontend exposes every local chemistry operation", () => {
-  for (const operation of ["prepareMolecule", "predictAdmet", "prepareDocking", "fragmentRetrosynthesis", "listCampaigns", "queueCandidate", "reviewCandidate"]) {
+  for (const operation of ["prepareMolecule", "predictAdmet", "prepareDocking", "fragmentRetrosynthesis", "listCampaigns", "queueCandidate", "reviewCandidate", "registerTranslationInput", "reviewTranslationInput"]) {
     assert.match(api, new RegExp(operation));
   }
   assert.match(ui, /Open-source validation workbench/);
   assert.match(ui, /COMPUTATIONAL PREDICTION/);
   assert.match(ui, /Asynchronous discovery campaign/);
   assert.match(ui, /Real execution, capability-gated/);
+  assert.match(ui, /Phase I and Phase II simulation readiness/);
+  assert.match(ui, /Run simulation · blocked/);
 });
