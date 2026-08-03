@@ -22,11 +22,18 @@ services:
         generateValue: true
       - key: AXIOM_CAMPAIGN_POLL_MS
         value: "2000"
-      # ADMET-AI imports a PyTorch model stack that exceeds the Starter
-      # instance's 512 MB limit. Keep the web/RDKit/docking-prep service stable
-      # until ADMET is moved to a separately sized worker.
+      - key: AXIOM_CAMPAIGN_JOB_TYPES
+        value: molecule_prep,docking_prepare,retrosynthesis_fragments,route_planning
+      - key: AXIOM_HEAVY_COMPUTE_MODE
+        value: github_actions
       - key: AXIOM_ADMET_EXECUTION_ENABLED
         value: "false"
+      - key: GITHUB_ACTIONS_REPOSITORY
+        value: Gourav2411/axiom-observatory
+      - key: GITHUB_ACTIONS_REF
+        value: main
+      - key: GITHUB_ACTIONS_TOKEN
+        sync: false
     disk:
       name: axiom-compute-artifacts
       mountPath: /app/services/artifacts

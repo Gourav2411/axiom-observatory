@@ -7,6 +7,7 @@ does not claim that predictions are measurements or experimental validation.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import importlib.metadata
 import json
 import os
@@ -19,7 +20,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from rdkit import Chem, DataStructs, rdBase
 from rdkit.Chem import AllChem, BRICS, Descriptors, Draw, Lipinski, QED, rdMolDescriptors
@@ -89,6 +91,61 @@ class DockingRunInput(DockingPreparationInput):
 class RoutePlanningInput(PredictionInput):
     max_transforms: int = Field(default=6, ge=1, le=12)
     time_limit_seconds: int = Field(default=120, ge=10, le=1800)
+
+
+class ReceptorInput(BaseModel):
+    receptor_id: str = Field(pattern=r"^[A-Za-z0-9_.-]+$", min_length=1, max_length=80)
+    pdbqt: str = Field(min_length=20, max_length=25_000_000)
+
+
+def _worker_key_valid(request: Request) -> bool:
+    expected = os.environ.get("AXIOM_INTERNAL_WORKER_KEY", "").strip()
+    if not expected:
+        return True
+    supplied = request.headers.get("x-axiom-worker-key", "")
+    return bool(supplied) and hmac.compare_digest(supplied, expected)
+
+
+@app.middleware("http")
+async def require_internal_worker_key(request: Request, call_next: Any) -> Any:
+    if request.url.path == "/health" or _worker_key_valid(request):
+        return await call_next(request)
+    return JSONResponse(status_code=401, content={"detail": "A valid internal worker key is required."})
+
+
+def _artifact_path(value: str) -> Path:
+    candidate = (ROOT / value).resolve() if not Path(value).is_absolute() else Path(value).resolve()
+    if ARTIFACT_ROOT.resolve() not in candidate.parents or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="The requested worker artifact does not exist.")
+    return candidate
+
+
+@app.get("/artifacts/{artifact_name}")
+def download_artifact(artifact_name: str) -> FileResponse:
+    if Path(artifact_name).name != artifact_name:
+        raise HTTPException(status_code=404, detail="The requested worker artifact does not exist.")
+    return FileResponse(_artifact_path(str(Path("services/artifacts") / artifact_name)), filename=artifact_name)
+
+
+@app.post("/receptors")
+def register_receptor(payload: ReceptorInput) -> dict[str, Any]:
+    upper = payload.pdbqt.upper()
+    if not any(marker in upper for marker in ("ATOM  ", "HETATM")) or "ROOT" in upper:
+        raise HTTPException(status_code=422, detail="Expected a rigid receptor PDBQT with ATOM or HETATM records, not a ligand torsion tree.")
+    normalized = payload.pdbqt.replace("\r\n", "\n").strip() + "\n"
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    file_name = f"{payload.receptor_id}-{digest[:16]}.pdbqt"
+    receptor_path = RECEPTOR_ROOT / file_name
+    receptor_path.write_text(normalized, encoding="utf-8")
+    return {
+        "schemaVersion": "axiom-receptor.v1",
+        "status": "registered",
+        "receptorId": payload.receptor_id,
+        "receptorPath": file_name,
+        "sha256": digest,
+        "byteSize": len(normalized.encode("utf-8")),
+        "boundary": "The receptor file was syntactically registered. Protonation, missing residues, cofactors, waters, and pocket suitability still require scientific review.",
+    }
 
 
 def _admet_domain_registry() -> dict[str, Any]:
