@@ -1,0 +1,27 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import test from "node:test";
+
+const runner = await readFile(new URL("../scripts/campaign-worker.mjs", import.meta.url), "utf8");
+const repository = await readFile(new URL("../worker/campaign-repository.js", import.meta.url), "utf8");
+const server = await readFile(new URL("../worker/index.js", import.meta.url), "utf8");
+
+test("local campaign worker executes the complete queued workflow without placeholder science", () => {
+  for (const job of ["molecule_prep", "admet", "docking_prepare", "docking_score", "retrosynthesis_fragments", "route_planning"]) {
+    assert.match(runner, new RegExp(`job\\.job_type === "${job}"`));
+  }
+  assert.match(runner, /lease_campaign_jobs_v1/);
+  assert.match(runner, /complete_campaign_job_v1/);
+  assert.match(runner, /No docking engine executed; no poses, affinities, redocking control, or binding claims exist/i);
+  assert.match(runner, /No AiZynthFinder policy search executed/i);
+  assert.match(runner, /not the ADMET-AI training-set applicability domain/i);
+});
+
+test("campaign API requires an authenticated principal and delegates writes to scoped RPCs", () => {
+  for (const path of ["campaigns", "candidates", "queue", "reviews"]) assert.match(server, new RegExp(path));
+  assert.match(server, /authenticateSupabaseRequest/);
+  for (const rpc of ["create_campaign_v1", "add_campaign_candidate_v1", "queue_candidate_workflow_v1", "submit_scientific_review_v1"]) {
+    assert.match(repository, new RegExp(rpc));
+  }
+  assert.doesNotMatch(repository, /authorization: `Bearer \$\{serviceRoleKey\}`/);
+});

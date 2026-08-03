@@ -82,7 +82,9 @@ npx supabase functions list
 
 Set `AXIOM_EMBED_INTERNAL_KEY` to the same server-only value used by the application for `SUPABASE_SERVICE_ROLE_KEY`, preferably through a protected environment file so the value does not enter shell history. Keep function JWT verification enabled; do not deploy with `--no-verify-jwt`. The function uses the Supabase Edge runtime's built-in `gte-small` session and does not require a third-party model API key.
 
-Configure the following values in the application hosting environment:
+This project is currently local-first. Keep the ChatGPT Sites deployment out of the active auth loop until we deliberately return to hosting. For any future non-local host, first make sure the host is public at the routing layer or choose a host that does not add its own login gate in front of Supabase callbacks.
+
+Configure the following values in the application hosting environment when a deployment host is selected:
 
 - server-only `SUPABASE_URL`;
 - server-only `SUPABASE_SERVICE_ROLE_KEY`;
@@ -101,33 +103,28 @@ The browser Auth surface supports four related flows:
 - password recovery via `resetPasswordForEmail`, returning through `/reset-password`, followed by an authenticated `updateUser({ password })` submission;
 - Google OAuth via `signInWithOAuth({ provider: "google" })`, returning through `/auth/callback`.
 
-In Supabase Authentication → URL Configuration, set the Site URL to:
+In Supabase Authentication → URL Configuration for local development, set the Site URL to:
 
 ```text
-https://axiom-observatory.minionarts.chatgpt.site
+http://localhost:4174
 ```
 
 Allow these exact Redirect URLs:
 
 ```text
-https://axiom-observatory.minionarts.chatgpt.site/auth/callback
-https://axiom-observatory.minionarts.chatgpt.site/reset-password
 http://localhost:4174/auth/callback
 http://localhost:4174/reset-password
 http://127.0.0.1:4174/auth/callback
 http://127.0.0.1:4174/reset-password
 ```
 
-The client also appends a validated `sb_flow_id` query parameter so concurrent
-PKCE flows use the verifier created for that exact attempt. Keep the exact
-entries above and add the same six entries with the narrowly scoped
-`?sb_flow_id=*` suffix shown in `supabase/config.toml`; do not use a path-wide
-production wildcard. If Supabase falls back to the Site URL, the application
-also accepts a coded root callback and immediately cleans its one-time values.
+Keep these callback URLs exact during local development. If Supabase falls back
+to the Site URL, the application also accepts a coded root callback and
+immediately cleans its one-time values.
 
 The Site URL is the safe default used when a flow omits its redirect. Application calls should still pass the appropriate explicit URL. If custom email templates construct links from `{{ .SiteURL }}`, update them to honor `{{ .RedirectTo }}`; the stock `{{ .ConfirmationURL }}` already carries the allowed destination.
 
-The browser client uses PKCE with an explicit one-time callback exchange. Supabase therefore returns a short-lived `?code=` that survives ordinary query-preserving redirects instead of putting access and refresh tokens in a URL fragment. The app waits for that exchange before removing callback parameters, keeps the browser on `/reset-password`, and records only a short-lived, user-matched recovery latch in `sessionStorage` so a reload does not collapse into the normal sign-in screen. PKCE still requires the callback to complete in the same browser and device that initiated signup, magic link, recovery, or OAuth. Supabase recommends that password-reset pages be publicly reachable; while the Sites deployment remains owner-only, the outer ChatGPT access gate is still an extra dependency and email callbacks are not production-reliable across devices or email-client browsers. The production topology should make the Site public—with Supabase still protecting the application and API—or move these callbacks to another public application host before general use.
+The browser client uses PKCE with an explicit one-time callback exchange. Supabase therefore returns a short-lived `?code=` that survives ordinary query-preserving redirects instead of putting access and refresh tokens in a URL fragment. The app waits for that exchange before removing callback parameters, keeps the browser on `/reset-password`, and records only a short-lived, user-matched recovery latch in `sessionStorage` so a reload does not collapse into the normal sign-in screen. PKCE still requires the callback to complete in the same browser and device that initiated signup, magic link, recovery, or OAuth. Supabase recommends that password-reset pages be publicly reachable; do not put another authentication layer in front of these callback routes.
 
 ### Google provider setup
 
@@ -136,7 +133,6 @@ The browser client uses PKCE with an explicit one-time callback exchange. Supaba
 3. Add these Authorized JavaScript origins (origins have no path):
 
    ```text
-   https://axiom-observatory.minionarts.chatgpt.site
    http://localhost:4174
    ```
 
@@ -259,22 +255,22 @@ The API and UI expose a concise workflow trace:
 2. Hybrid retriever or an explicitly labeled lexical retriever;
 3. Citation guard.
 
-This is a deterministic registered-tool flow, not a free-form autonomous agent. The UI also exposes index counts, model/revision/dimensions, chunking policy, fallback reason, score breakdowns, citation coverage, and source links. Missing metadata is displayed as unavailable rather than inferred.
+This is a deterministic registered-tool flow, not a free-form autonomous agent. The UI also exposes index counts, model/revision/dimensions, chunking policy, fallback reason, score breakdowns, citation coverage, source links, and a validation-readiness plan for future docking, ADMET/toxicity, and retrosynthesis workers. Missing metadata is displayed as unavailable rather than inferred.
 
 No synthesizer is configured. A completed citation guard does not create a scientific claim.
 
 ## Scientific jobs
 
-Supabase Queues and the `jobs` table prepare durable dispatch and user-visible state, but queue consumers are not implemented in this milestone. Future scientific jobs will run in isolated external containers:
+The campaign layer uses Supabase tables and RPCs for durable dispatch and user-visible state. The local consumer leases jobs with `FOR UPDATE SKIP LOCKED`, executes the local chemistry service, and atomically records evaluations and candidate rank components. Production workers can replace the local consumer without changing the campaign contract:
 
 ```text
 API → Postgres transaction → queue message → external worker
     → private Storage artifacts → normalized prediction + provenance
 ```
 
-Workers must be idempotent, lease jobs, heartbeat, checkpoint, record image/tool/model versions, and complete a queue message only after outputs are durably committed. The `axiom-embed` Edge Function is not a template for executing AutoDock Vina, RDKit, ADMET-AI, or GPU-heavy scientific workloads.
+Jobs use candidate/type idempotency keys, bounded leases, attempt counts, explicit `blocked` states, and versioned scientific boundaries. Production workers still need lease renewal, checkpoints, private artifact upload, dead-letter operations, and container/image provenance. The `axiom-embed` Edge Function is not a template for executing AutoDock Vina, RDKit, ADMET-AI, or GPU-heavy scientific workloads.
 
-Docking, ADMET/toxicity, retrosynthesis, scientific-answer generation, wet-lab validation, and clinical validation remain not configured.
+RDKit, ADMET-AI, Meeko, and BRICS execute locally. Vina and AiZynthFinder adapters execute only when real binaries and inputs are configured; they otherwise persist blocked results. Scientific-answer generation, wet-lab validation, and clinical validation remain out of scope.
 
 ## Validation
 
@@ -283,13 +279,13 @@ Run the network-independent tests and production build:
 ```bash
 npm test
 npm run build
-npm run test:sites
 ```
 
 The suite covers:
 
 - public upstream search/evidence normalization and score semantics;
 - ephemeral lexical retrieval and `generated: false`;
+- validation-plan readiness without simulated chemistry;
 - authenticated durable snapshots, transactional normalized ingestion, hybrid retrieval fixtures, RLS identity propagation, and fail-closed errors;
 - deterministic chunk bounds, hashes, identifiers, citations, and provenance;
 - embedding-client authentication, timeouts, dimension/revision drift, and vector validation;
@@ -310,7 +306,7 @@ Static and mocked tests do not replace a remote integration pass. Before product
 - `gte-small` is a retrieval baseline, not a biomedical reasoning, safety, toxicity, or efficacy model.
 - The Supabase-managed revision label is not an immutable upstream model commit.
 - Citation presence does not establish claim support or scientific validity.
-- Cross-run retrieval, reranking, generation, claim entailment, and human-review workflows are absent.
+- Cross-run retrieval, biomedical reranking, generation, and claim entailment are absent; campaign-level comparative ranking and human review are implemented.
 - Retry queues, rate limits, production observability, capacity tests, drift monitoring, and disaster recovery are incomplete.
 - Health checks probe durable Postgres but do not execute the Edge model; run/index and retrieval responses provide the authoritative embedding capability state.
-- Docking, molecular preparation, ADMET/toxicity, retrosynthesis, wet-lab validation, and clinical translation are unavailable.
+- Actual Vina scoring and AiZynthFinder route planning remain unavailable until their local binaries and scientific inputs are configured; wet-lab validation and clinical translation remain unavailable.

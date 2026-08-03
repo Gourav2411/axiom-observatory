@@ -10,9 +10,10 @@ const worker = path.join(root, "worker", "index.js");
 const runRepository = path.join(root, "worker", "run-repository.js");
 const embeddingClient = path.join(root, "worker", "embedding-client.js");
 const ragPipeline = path.join(root, "worker", "rag-pipeline.js");
+const validationPlan = path.join(root, "worker", "validation-plan.js");
 const hosting = path.join(root, ".openai", "hosting.json");
 
-for (const file of [index, worker, runRepository, embeddingClient, ragPipeline, hosting]) {
+for (const file of [index, worker, runRepository, embeddingClient, ragPipeline, validationPlan, hosting]) {
   if (!existsSync(file)) throw new Error("Missing Sites build input: " + file);
 }
 
@@ -22,6 +23,7 @@ copyFileSync(worker, path.join(dist, "server", "index.js"));
 copyFileSync(runRepository, path.join(dist, "server", "run-repository.js"));
 copyFileSync(embeddingClient, path.join(dist, "server", "embedding-client.js"));
 copyFileSync(ragPipeline, path.join(dist, "server", "rag-pipeline.js"));
+copyFileSync(validationPlan, path.join(dist, "server", "validation-plan.js"));
 copyFileSync(hosting, path.join(dist, ".openai", "hosting.json"));
 
 console.log("Prepared Sites build: server modules and dist/.openai/hosting.json");

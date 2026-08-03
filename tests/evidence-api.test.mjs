@@ -13,6 +13,9 @@ const mockUpstream = async (input, init = {}) => {
     if (body.query.includes("TargetEvidence")) {
       return Response.json({ data: { target: { id: "ENSG00000100000", approvedSymbol: "DEMO", approvedName: "demo target", biotype: "protein_coding", tractability: [], associatedDiseases: { count: 1, rows: [{ disease: { id: "EFO_0000001", name: "Demo disease" }, score: 0.72, datatypeScores: [{ id: "genetic_association", score: 0.8 }], datasourceScores: [{ id: "ot_genetics_portal", score: 0.8 }] }] } } } });
     }
+    if (body.query.includes("TargetAssociatedDiseases")) {
+      return Response.json({ data: { target: { id: "ENSG00000100000", approvedSymbol: "DEMO", associatedDiseases: { count: 2, rows: [{ disease: { id: "EFO_0000001", name: "Demo disease" }, score: 0.72 }, { disease: { id: "MONDO_0000002", name: "Another condition" }, score: 0.31 }] } } } });
+    }
     if (body.query.includes("PairEvidence")) {
       return Response.json({ data: { disease: { id: "EFO_0000001", name: "Demo disease", evidences: { count: 1, cursor: null, rows: [{ id: "evidence-1", target: { id: "ENSG00000100000" }, disease: { id: "EFO_0000001" }, datatypeId: "genetic_association", datasourceId: "ot_genetics_portal", score: 0.81, literature: ["123456"], studyId: "GCST0001", variant: null, drug: null }] } } } });
     }
@@ -68,7 +71,13 @@ test("health reports honest capability and persistence states", async () => {
   assert.equal(body.capabilities.openTargets, true);
   assert.equal(body.capabilities.retrieval, true);
   assert.equal(body.capabilities.generation, false);
-  assert.equal(body.capabilities.docking, false);
+  assert.equal(body.capabilities.docking.configured, false);
+  assert.equal(body.capabilities.docking.available, false);
+  assert.match(body.capabilities.docking.provider, /AutoDock Vina|Smina/i);
+  assert.equal(body.capabilities.molecule_prep.configured, false);
+  assert.match(body.capabilities.molecule_prep.provider, /RDKit/i);
+  assert.equal(body.capabilities.admet.configured, false);
+  assert.equal(body.capabilities.retrosynthesis.configured, false);
   assert.deepEqual(body.persistence, {
     mode: "ephemeral_memory",
     durable: false,
@@ -84,6 +93,32 @@ test("entity search preserves upstream rank without calling it confidence", asyn
   assert.equal(body.items[0].id, "ENSG00000100000");
   assert.equal(body.items[0].searchRankScore, 12.4);
   assert.match(body.items[0].scoreNote, /not scientific confidence/i);
+  assert.equal(body.catalogScope, "full_index");
+  assert.equal(body.source, "Open Targets Platform");
+  assert.equal(body.pageSize, 30);
+});
+
+test("disease search accepts a normal disease name and reports searchable fields", async () => {
+  const response = await worker.fetch(new Request("https://example.test/api/diseases/search?q=lung%20cancer"), env);
+  const body = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(body.query, "lung cancer");
+  assert.equal(body.items[0].entityType, "disease");
+  assert.ok(body.matchFields.includes("preferred name"));
+  assert.ok(body.matchFields.includes("synonym"));
+});
+
+test("selecting a target can retrieve and filter its ranked disease associations", async () => {
+  const response = await worker.fetch(new Request("https://example.test/api/targets/ENSG00000100000/diseases?q=demo"), env);
+  const body = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(body.catalogScope, "target_associations");
+  assert.equal(body.associationTotal, 2);
+  assert.equal(body.associationsLoaded, 2);
+  assert.equal(body.total, 1);
+  assert.equal(body.items[0].label, "Demo disease");
+  assert.equal(body.items[0].associationScore, 0.72);
+  assert.match(body.items[0].scoreNote, /not scientific confidence/i);
 });
 
 test("run creation normalizes live evidence, literature and provenance", async () => {
@@ -96,12 +131,66 @@ test("run creation normalizes live evidence, literature and provenance", async (
   assert.equal(run.literature.items[0].doi, "10.1000/demo.1");
   assert.equal(run.literature.items[0].abstractText, "Background This study evaluates a fibrotic disease mechanism and kinase signalling.");
   assert.equal(run.literature.items[0].journal, "Nested Test Journal");
-  assert.equal(run.capabilities.admet, false);
+  assert.equal(run.capabilities.admet.configured, false);
+  assert.equal(run.validationPlan.generated, false);
+  assert.equal(run.validationPlan.simulationRun, false);
+  assert.equal(run.validationPlan.status, "blocked_missing_inputs_or_workers");
+  assert.equal(run.validationPlan.workers.length, 4);
+  assert.match(run.validationPlan.workers.find((worker) => worker.id === "molecule_prep").outputBoundary, /standardizes and validates/i);
+  assert.match(run.validationPlan.workers.find((worker) => worker.id === "docking").outputBoundary, /not experimental binding validation/i);
   assert.equal(run.provenance.length, 2);
 
   const stored = await worker.fetch(new Request(`https://example.test/api/runs/${run.id}`), env);
   assert.equal(stored.status, 200);
   assert.equal((await stored.json()).id, run.id);
+});
+
+test("validation plan reports worker readiness without simulated chemistry", async () => {
+  const run = await createDemoRun();
+  const response = await worker.fetch(new Request(`https://example.test/api/runs/${run.id}/validation-plan`), env);
+  const plan = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(plan.schemaVersion, "validation-plan.v1");
+  assert.equal(plan.runId, run.id);
+  assert.equal(plan.generated, false);
+  assert.equal(plan.realDataUsed, true);
+  assert.equal(plan.simulationRun, false);
+  assert.equal(plan.inputAudit.evidenceContext.status, "available");
+  assert.equal(plan.inputAudit.molecule.status, "missing");
+  assert.equal(plan.inputAudit.receptor.status, "missing");
+  assert.deepEqual(plan.workers.map((item) => item.id), ["molecule_prep", "docking", "admet", "retrosynthesis"]);
+  for (const validationWorker of plan.workers) {
+    assert.equal(validationWorker.configured, false);
+    assert.equal(validationWorker.available, false);
+    assert.match(validationWorker.reason, /register|Set AXIOM_/i);
+  }
+  assert.match(plan.boundary, /does not contain docking scores/i);
+  assert.doesNotMatch(JSON.stringify(plan), /binding affinity":|"ames":|"route_tree":/i);
+});
+
+test("registered local chemistry endpoints replace stale not-configured pipeline stages", async () => {
+  const configuredEnv = {
+    ...env,
+    AXIOM_RDKIT_WORKER_URL: "http://127.0.0.1:8791/prepare",
+    AXIOM_ADMET_WORKER_URL: "http://127.0.0.1:8791/admet",
+    AXIOM_DOCKING_WORKER_URL: "http://127.0.0.1:8791/docking/prepare",
+    AXIOM_RETROSYNTHESIS_WORKER_URL: "http://127.0.0.1:8791/retrosynthesis/fragments",
+  };
+  const response = await worker.fetch(new Request("https://example.test/api/runs", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ targetId: "ENSG00000100000", diseaseId: "EFO_0000001" }),
+  }), configuredEnv);
+  const run = await response.json();
+
+  assert.equal(response.status, 201);
+  for (const stageId of ["molecule_prep", "docking", "safety", "synthesis"]) {
+    const stage = run.stages.find((item) => item.id === stageId);
+    assert.equal(stage.status, "available_local");
+    assert.doesNotMatch(stage.reason, /install and register|No worker configured/i);
+  }
+  assert.equal(run.validationPlan.workers.every((item) => item.configured), true);
 });
 
 test("invalid run input fails closed", async () => {
@@ -150,6 +239,54 @@ test("retrieval ranks run evidence without generating an answer", async () => {
   assert.equal(evidenceRetrieval.results[0].sourceType, "open_targets_direct_evidence");
   assert.equal(evidenceRetrieval.results[0].provenance.studyId, "GCST0001");
   assert.ok(evidenceRetrieval.results[0].citations.includes("PMID:123456"));
+});
+
+test("zero-result retrieval is not reported as a passed citation audit", async () => {
+  const run = await createDemoRun();
+  const response = await worker.fetch(new Request(`https://example.test/api/runs/${run.id}/retrieval`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ query: "zzzz-no-matching-token", topK: 5 }),
+  }), env);
+  const retrieval = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(retrieval.results.length, 0);
+  assert.equal(retrieval.citationAudit.status, "not_evaluated");
+  assert.equal(retrieval.citationAudit.coverage, null);
+  assert.equal(retrieval.workflow.find((step) => step.step === "citation_guard").status, "not_evaluated");
+});
+
+test("successful empty upstream responses produce a partial run and block retrieval", async () => {
+  const emptyUpstream = async (input, init = {}) => {
+    const url = String(input);
+    if (url.includes("opentargets")) {
+      const body = JSON.parse(init.body);
+      if (body.query.includes("TargetEvidence")) return Response.json({ data: { target: { id: "ENSG00000100000", approvedSymbol: "DEMO", approvedName: "demo target", biotype: "protein_coding", tractability: [], associatedDiseases: { count: 0, rows: [] } } } });
+      if (body.query.includes("PairEvidence")) return Response.json({ data: { disease: { id: "EFO_0000001", name: "Demo disease", evidences: { count: 0, cursor: null, rows: [] } } } });
+    }
+    if (url.includes("europepmc")) return Response.json({ hitCount: 0, resultList: { result: [] } });
+    return new Response("unhandled", { status: 500 });
+  };
+  const emptyEnv = { ...env, UPSTREAM_FETCH: emptyUpstream };
+  const created = await worker.fetch(new Request("https://example.test/api/runs", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ targetId: "ENSG00000100000", targetLabel: "DEMO", diseaseId: "EFO_0000001", diseaseLabel: "Demo disease" }),
+  }), emptyEnv);
+  const run = await created.json();
+  assert.equal(created.status, 201);
+  assert.equal(run.status, "partial");
+  assert.equal(run.evidence.items.length, 0);
+  assert.equal(run.literature.items.length, 0);
+  assert.match(run.warnings.join(" "), /no direct evidence records/i);
+  const retrieval = await worker.fetch(new Request(`https://example.test/api/runs/${run.id}/retrieval`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ query: "demo disease", topK: 5 }),
+  }), emptyEnv);
+  const payload = await retrieval.json();
+  assert.equal(retrieval.status, 409);
+  assert.equal(payload.error.code, "empty_retrieval_corpus");
 });
 
 test("retrieval validates query and topK", async () => {
@@ -348,6 +485,10 @@ test("Supabase repository persists and retrieves the durable run snapshot", asyn
     SUPABASE_FETCH: supabase.fetch,
     EMBEDDING_FETCH: supabase.embeddingFetch,
     AUTH_FETCH: mockAuth,
+    AXIOM_RDKIT_WORKER_URL: "http://127.0.0.1:8791/prepare",
+    AXIOM_ADMET_WORKER_URL: "http://127.0.0.1:8791/admet",
+    AXIOM_DOCKING_WORKER_URL: "http://127.0.0.1:8791/docking/prepare",
+    AXIOM_RETROSYNTHESIS_WORKER_URL: "http://127.0.0.1:8791/retrosynthesis/fragments",
   };
 
   const healthResponse = await worker.fetch(new Request("https://example.test/api/health"), supabaseEnv);
@@ -378,6 +519,7 @@ test("Supabase repository persists and retrieves the durable run snapshot", asyn
   assert.equal(run.rag.status, "completed");
   assert.equal(run.rag.mode, "hybrid_rrf_v2");
   assert.equal(run.rag.counts.embeddedChunks, 2);
+  assert.equal(run.stages.filter((stage) => stage.status === "available_local").length, 4);
   assert.doesNotMatch(run.warnings.join(" "), /ephemeral/i);
   assert.equal(supabase.snapshots.get(run.id).snapshot.id, run.id);
   assert.deepEqual(supabase.snapshots.get(run.id).snapshot.persistence, health.persistence);
@@ -407,6 +549,7 @@ test("Supabase repository persists and retrieves the durable run snapshot", asyn
     "/rest/v1/rpc/ensure_default_workspace",
     "/rest/v1/rpc/persist_evidence_run_v1",
     "/rest/v1/document_chunks",
+    "/rest/v1/rpc/apply_chunk_embeddings_v1",
     "/rest/v1/rpc/apply_chunk_embeddings_v1",
     "/rest/v1/run_snapshots",
     "/rest/v1/run_snapshots",

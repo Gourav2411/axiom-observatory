@@ -2,6 +2,8 @@
 
 Axiom Observatory is an open-source-first evidence workspace for therapeutic target research. The current development milestone resolves a target and disease, retrieves live evidence from Open Targets and literature from Europe PMC, transactionally normalizes a durable run, builds a source-linked retrieval index, and exposes an inspectable agent workflow for grounded passage retrieval.
 
+The ordered implementation backlog—including real controlled docking, calibrated applicability domains, route planning, assay ingestion, reproducible artifacts, and gated Phase I/II model-informed simulation—is maintained in [docs/development-roadmap.md](docs/development-roadmap.md).
+
 It is an evidence retrieval system, not a clinical decision system. It does not treat association or retrieval scores as probabilities, generate a scientific answer, or simulate docking, toxicity, efficacy, or experimental validation.
 
 “Live in Supabase mode” below describes the implemented repository path; each new environment must apply the migrations, configure the private function gate, and deploy `axiom-embed` before enabling it.
@@ -22,9 +24,11 @@ It is an evidence retrieval system, not a clinical decision system. It does not 
 | Run persistence | Dual mode | Durable, authenticated Supabase Postgres when configured; explicit process-memory mode otherwise |
 | Lexical fallback | Live | Durable Postgres FTS when embeddings are unavailable; deterministic in-memory lexical ranking when Supabase is not configured |
 | Database authorization | Implemented vertical | Supabase browser Auth, server-side session validation, default workspace provisioning, JWT-derived ownership, and RLS-scoped reads/writes |
-| Docking | Not configured | No Smina or AutoDock Vina worker is installed |
-| ADMET/toxicity | Not configured | No ADMET-AI worker is installed; any future output remains a prediction |
-| Retrosynthesis | Not configured | No AiZynthFinder worker is installed |
+| Asynchronous campaigns | Live locally | Supabase-backed campaigns, candidate ingestion, six-job workflows, leasing, comparative ranking, and human review |
+| Molecule preparation | Live locally | RDKit standardization, descriptors, structural alerts, ETKDG/MMFF conformers, and artifacts |
+| Docking | Partially live locally | Meeko preparation is live; actual Vina execution and same-box score controls are gated on a real binary and prepared receptor |
+| ADMET/toxicity | Live locally | ADMET-AI inference with provenance and explicit prediction/applicability limitations |
+| Retrosynthesis | Partially live locally | RDKit BRICS is live; actual AiZynthFinder planning is gated on a binary, policy configuration, and stock snapshot |
 | Agentic generation | Not configured | No synthesizer or scientific-answer model is enabled |
 
 ## Retrieval modes
@@ -43,10 +47,10 @@ Use Node.js `20.19+` or `22.12+` (the repository includes `.nvmrc`). The simples
 
 ```bash
 npm install
-npm run dev -- --host 0.0.0.0 --port 4174 --strictPort
+npm run dev
 ```
 
-Open `http://localhost:4174/`. This mode is intentionally ephemeral and uses `lexical_rank_v1`; it does not claim to have a pgvector index.
+Open `http://localhost:4174/`. With Supabase variables configured, this launches the web/API server, local chemistry service, and durable campaign queue consumer together.
 
 The two connected upstream services are public. Sustained or production use still needs caching, throttling, retries, release pinning, monitoring, and review of upstream terms.
 
@@ -81,7 +85,7 @@ npm run dev -- --host 0.0.0.0 --port 4174 --strictPort
 
 Durable `/api/runs*` routes require a Supabase session. Email/password sign-up requires email confirmation. Users can also request a passwordless magic link, request a password-reset email, and sign in with the verified Google provider. Production builds offer Google by default; `VITE_SUPABASE_GOOGLE_ENABLED=false` can explicitly hide it in an environment where the provider is unavailable. The flag is only a UI switch and does not configure or secure the provider.
 
-Magic-link and Google sign-in return through `/auth/callback`; password recovery returns through `/reset-password`. The browser uses PKCE so credentials return as a short-lived query code instead of URL-fragment tokens; the link must be completed in the same browser that requested it. The checked-in Supabase configuration allows only the exact production destinations at `https://axiom-observatory.minionarts.chatgpt.site` and their localhost development equivalents. Creating a run then performs authenticated normalized ingestion and bounded embedding batches before marking the RAG index complete. If the embedding worker is unavailable, normalized data remains durable and retrieval reports the Postgres FTS fallback rather than pretending hybrid ranking succeeded.
+Magic-link and Google sign-in return through `/auth/callback`; password recovery returns through `/reset-password`. The browser uses PKCE so credentials return as a short-lived query code instead of URL-fragment tokens; the link must be completed in the same browser that requested it. The checked-in Supabase configuration is local-first and allows only the exact localhost development destinations. Creating a run then performs authenticated normalized ingestion and bounded embedding batches before marking the RAG index complete. If the embedding worker is unavailable, normalized data remains durable and retrieval reports the Postgres FTS fallback rather than pretending hybrid ranking succeeded.
 
 Stop the local stack with `npm run supabase:stop` after stopping the function server.
 
@@ -107,11 +111,12 @@ For Google, create a Google Cloud OAuth client of type **Web application**, add 
 ```bash
 npm test
 npm run build
-npm run test:sites
+npm run validation:check
+npm run chemistry:check
 npm run supabase:lint
 ```
 
-The automated suite covers the upstream API contract, ephemeral and durable repository behavior, normalized payloads and chunk bounds, the embedding client, the Edge Function's authenticated 384-dimensional contract, schema/RLS invariants, hybrid retrieval fixtures, and static hosting behavior. Mocked transports keep unit and API tests network-independent. `supabase:lint` requires the local Docker-backed stack.
+The automated suite covers the upstream API contract, ephemeral and durable repository behavior, normalized payloads and chunk bounds, the embedding client, the Edge Function's authenticated 384-dimensional contract, schema/RLS invariants, hybrid retrieval fixtures, and scientific-output boundary contracts. Mocked transports keep unit and API tests network-independent. `validation:check` reports whether RDKit, Meeko, Vina/Smina, ADMET-AI, and retrosynthesis toolchains are installed in the isolated local runtimes. `chemistry:check` probes the running worker. `test:sites` remains available as an explicit optional check when we return to hosted Sites work. `supabase:lint` requires the local Docker-backed stack.
 
 After deploying to a disposable or development Supabase project, `npm run test:remote-rag` performs a real Open Targets + Europe PMC run, embeds its normalized chunks, executes hybrid retrieval, checks citation coverage and cross-user isolation, and removes the temporary users and workspaces it creates. It reads credentials from the ignored `.env.local`; do not run it against an environment where temporary account creation is prohibited.
 
@@ -121,7 +126,7 @@ Browser verification should additionally exercise one authenticated durable run 
 2. retrieval reports its actual hybrid or lexical mode;
 3. planner, retriever, and citation-guard states are visible;
 4. result scores are labeled as ranking/similarity, citations and source URLs are preserved, and `generated` remains `false`;
-5. docking, ADMET/toxicity, retrosynthesis, and generation remain unavailable.
+5. the Validation tab runs RDKit preparation, ADMET-AI inference, Meeko docking preparation, and BRICS fragment analysis while keeping unavailable engines explicit.
 
 ## API
 
@@ -132,7 +137,17 @@ Browser verification should additionally exercise one authenticated durable run 
 | `GET` | `/api/diseases/search?q=pulmonary%20fibrosis` | Resolve a disease/phenotype identifier |
 | `POST` | `/api/runs` | Retrieve evidence, persist normalized records, and attempt RAG indexing |
 | `GET` | `/api/runs/:id` | Read an ephemeral run or an authenticated, workspace-authorized durable snapshot |
+| `GET` | `/api/runs/:id/validation-plan` | Return docking, ADMET/toxicity, and retrosynthesis readiness without executing predictions |
 | `POST` | `/api/runs/:id/retrieval` | Run grounded hybrid or lexical passage retrieval without generating an answer |
+| `GET` | `/api/chemistry/health` | Report the live local chemistry engines and exact blockers |
+| `POST` | `/api/chemistry/prepare` | Standardize a molecule, calculate descriptors/alerts, and generate a reproducible 3D conformer |
+| `POST` | `/api/chemistry/admet` | Run local ADMET-AI model inference with endpoint metadata and provenance |
+| `POST` | `/api/chemistry/docking/prepare` | Generate a Meeko ligand PDBQT and deterministic Vina manifest without inventing scores |
+| `GET/POST` | `/api/runs/:id/campaigns` | List or create a durable campaign attached to an evidence run |
+| `POST` | `/api/campaigns/:id/candidates` | Ingest a named SMILES candidate |
+| `POST` | `/api/candidates/:id/queue` | Queue preparation, ADMET, docking, BRICS, and route-planning jobs |
+| `POST` | `/api/candidates/:id/reviews` | Record an advance/hold/reject scientific decision and evidence snapshot |
+| `POST` | `/api/chemistry/retrosynthesis/fragments` | Run RDKit BRICS rule-based fragment analysis without claiming a synthetic route |
 
 Example run request:
 
@@ -154,7 +169,7 @@ Example retrieval request:
 }
 ```
 
-A run can include `rag.status`, the retrieval mode, embedding model/revision/dimensions, normalized record counts, chunking policy, and an explicit fallback reason. A retrieval can include the agent workflow, embedding provenance, citation audit, and per-result lexical, vector, and fused scores/ranks while retaining source citations and URLs. `generated` remains `false`.
+A run can include `rag.status`, the retrieval mode, embedding model/revision/dimensions, normalized record counts, chunking policy, validation worker readiness, and an explicit fallback reason. A retrieval can include the agent workflow, embedding provenance, citation audit, and per-result lexical, vector, and fused scores/ranks while retaining source citations and URLs. `generated` remains `false`.
 
 In Supabase mode, all `/api/runs*` requests require the browser's Supabase bearer token. Target and disease search remain public because they proxy public identifier-resolution sources.
 
@@ -165,9 +180,12 @@ In Supabase mode, all `/api/runs*` requests require the browser's Supabase beare
 - Indexing is bounded: chunks are at most 220 words/1,800 characters, Edge Function inputs are 3–2,000 characters, embedding batches contain at most six items, and runs exceeding the 500-chunk safety cap are rejected by the indexer.
 - Retrieval uses run-scoped FTS and semantic candidates with RRF; there is no cross-run corpus search, biomedical reranker, generated answer, or claim-entailment evaluator.
 - Citation coverage validates identifier presence only. Source quality, causal interpretation, experimental reproducibility, and clinical relevance require separate review.
-- Remote multi-user load, durable retry queues, rate limits, observability, retrieval quality, and model drift still need production validation; immediate embedding calls have only a bounded three-attempt transient retry policy.
+- Remote multi-user load, robust retry/dead-letter policy, rate limits, observability, retrieval quality, and model drift still need production validation; the local campaign worker currently uses one-at-a-time leasing.
 - The health endpoint proves Postgres availability but does not execute an embedding probe; run/index and retrieval modes are authoritative for Edge Function availability.
-- Docking, molecular preparation, ADMET/toxicity, retrosynthesis, wet-lab validation, and clinical translation are not implemented.
+- RDKit molecular preparation, calculated descriptors, structural alerts, ETKDG/MMFF conformer generation, ADMET-AI inference, Meeko ligand preparation, Vina manifest generation, and RDKit BRICS decomposition run locally and produce versioned artifacts.
+- AutoDock Vina pose scoring is not enabled on this Apple Silicon environment because no compatible engine is registered. The UI prepares its inputs but never invents poses or affinities.
+- Full AiZynthFinder route search is not enabled: it requires a separate RDKit-compatible environment, expansion policy, optional filter policy, and stock database. BRICS fragments are explicitly not labeled as routes.
+- Wet-lab validation, reaction-yield validation, clinical safety, and clinical translation remain outside the system.
 
 ## Source semantics
 
