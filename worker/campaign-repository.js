@@ -1,4 +1,5 @@
 import { PersistenceError } from "./run-repository.js";
+import { assessClinicalReadiness } from "./clinical-readiness.js";
 
 const CAMPAIGN_TIMEOUT_MS = 12_000;
 
@@ -72,11 +73,12 @@ function createCampaignRepository(env, principal) {
       }, "campaign_list");
       if (!campaigns.length) return [];
       const campaignIds = campaigns.map((item) => item.id).join(",");
-      const [candidates, evaluations, reviews, jobs] = await Promise.all([
+      const [candidates, evaluations, reviews, jobs, assays] = await Promise.all([
         table("campaign_candidates", { campaign_id: `in.(${campaignIds})`, select: "*", order: "rank_score.desc.nullslast,created_at.asc" }, "candidate_list"),
         table("candidate_evaluations", { run_id: `eq.${runId}`, select: "*", order: "created_at.asc" }, "evaluation_list"),
         table("scientific_reviews", { run_id: `eq.${runId}`, select: "*", order: "created_at.desc" }, "review_list"),
         table("jobs", { run_id: `eq.${runId}`, select: "id,job_type,status,attempts,max_attempts,payload,result,error,created_at,updated_at", order: "created_at.desc" }, "campaign_job_list"),
+        table("assay_results", { run_id: `eq.${runId}`, select: "*", order: "created_at.desc" }, "assay_result_list"),
       ]);
       return campaigns.map((campaign) => ({
         ...campaign,
@@ -85,6 +87,12 @@ function createCampaignRepository(env, principal) {
           evaluations: evaluations.filter((evaluation) => evaluation.candidate_id === candidate.id),
           reviews: reviews.filter((review) => review.candidate_id === candidate.id),
           jobs: jobs.filter((job) => job.payload?.candidateId === candidate.id),
+          assays: assays.filter((assay) => assay.candidate_id === candidate.id),
+          clinicalReadiness: assessClinicalReadiness(
+            candidate,
+            assays.filter((assay) => assay.candidate_id === candidate.id),
+            campaign.settings?.clinicalInputs || {},
+          ),
         })),
       }));
     },
@@ -112,6 +120,9 @@ function createCampaignRepository(env, principal) {
         p_decision: input.decision,
         p_rationale: input.rationale,
       }, "candidate_review");
+    },
+    ingestAssay(candidateId, input) {
+      return rpc("ingest_assay_result_v1", { p_candidate_id: candidateId, p_input: input }, "assay_ingest");
     },
   };
 }

@@ -965,6 +965,25 @@ async function handleApi(request, env = {}) {
     }
   }
 
+  const candidateAssayMatch = url.pathname.match(/^\/api\/candidates\/([^/]+)\/assays$/);
+  if (candidateAssayMatch && request.method === "POST") {
+    let input;
+    try { input = await request.json(); } catch { return apiError("invalid_json", "Request body must be valid JSON", 400); }
+    const validNumber = typeof input?.value === "number" && Number.isFinite(input.value);
+    const validText = [input?.assayType, input?.endpoint, input?.unit, input?.provenance?.sourceReference].every((value) => typeof value === "string" && value.trim());
+    if (!validNumber || !validText) {
+      return apiError("invalid_input", "Assay type, endpoint, finite numeric value, unit, and provenance source reference are required", 400);
+    }
+    try {
+      const principal = await authenticateSupabaseRequest(request, env);
+      return json(await createCampaignRepository(env, principal).ingestAssay(candidateAssayMatch[1], input), 201);
+    } catch (error) {
+      const handled = handledInfrastructureError(error);
+      if (handled) return handled;
+      throw error;
+    }
+  }
+
   if (url.pathname === "/api/runs" && request.method === "POST") {
     let input;
     try { input = await request.json(); } catch { return apiError("invalid_json", "Request body must be valid JSON", 400); }

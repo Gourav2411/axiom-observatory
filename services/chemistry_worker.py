@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shutil
+import statistics
 import subprocess
 import threading
 import time
@@ -19,7 +20,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-from rdkit import Chem, rdBase
+from rdkit import Chem, DataStructs, rdBase
 from rdkit.Chem import AllChem, BRICS, Descriptors, Draw, Lipinski, QED, rdMolDescriptors
 from rdkit.Chem.FilterCatalog import FilterCatalog, FilterCatalogParams
 from rdkit.Chem.MolStandardize import rdMolStandardize
@@ -75,11 +76,69 @@ class DockingPreparationInput(PredictionInput):
 class DockingRunInput(DockingPreparationInput):
     receptor_path: str = Field(min_length=1, max_length=500)
     control_smiles: str | None = Field(default=None, max_length=10_000)
+    replicates: int = Field(default=3, ge=2, le=5)
 
 
 class RoutePlanningInput(PredictionInput):
     max_transforms: int = Field(default=6, ge=1, le=12)
     time_limit_seconds: int = Field(default=120, ge=10, le=1800)
+
+
+def _admet_domain_registry() -> dict[str, Any]:
+    configured = os.environ.get("AXIOM_ADMET_DOMAIN_REGISTRY")
+    if not configured:
+        raise HTTPException(status_code=503, detail="No calibrated ADMET applicability-domain registry is configured.")
+    path = Path(configured).resolve()
+    if not path.is_file():
+        raise HTTPException(status_code=503, detail="The configured ADMET applicability-domain registry does not exist.")
+    try:
+        registry = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise HTTPException(status_code=503, detail="The configured ADMET applicability-domain registry is invalid.")
+    if registry.get("schemaVersion") != "axiom-admet-domain-registry.v1" or not isinstance(registry.get("endpoints"), dict):
+        raise HTTPException(status_code=503, detail="The ADMET applicability-domain registry schema is unsupported.")
+    return registry
+
+
+@app.post("/applicability/admet")
+def admet_applicability(payload: PredictionInput) -> dict[str, Any]:
+    registry = _admet_domain_registry()
+    molecule = Chem.MolFromSmiles(payload.smiles)
+    if molecule is None:
+        raise HTTPException(status_code=422, detail="RDKit could not parse this SMILES structure.")
+    fingerprint_config = registry.get("fingerprint", {})
+    radius = int(fingerprint_config.get("radius", 2))
+    bits = int(fingerprint_config.get("bits", 2048))
+    generator = AllChem.GetMorganGenerator(radius=radius, fpSize=bits)
+    query = generator.GetFingerprint(molecule)
+    endpoints = []
+    for endpoint_id, definition in registry["endpoints"].items():
+        evidence = definition.get("calibrationEvidence", {})
+        references = definition.get("referenceSmiles", [])
+        if not references or not evidence.get("datasetSha256") or not evidence.get("splitStrategy"):
+            endpoints.append({"id": endpoint_id, "status": "not_evaluable", "reason": "Calibration evidence or reference chemistry is incomplete."})
+            continue
+        reference_fingerprints = [generator.GetFingerprint(item) for smiles in references if (item := Chem.MolFromSmiles(smiles)) is not None]
+        if not reference_fingerprints:
+            endpoints.append({"id": endpoint_id, "status": "not_evaluable", "reason": "No valid reference chemistry was available."})
+            continue
+        similarity = max(DataStructs.BulkTanimotoSimilarity(query, reference_fingerprints))
+        in_threshold = float(definition.get("inDomainThreshold", 0.5))
+        borderline_threshold = float(definition.get("borderlineThreshold", 0.35))
+        status = "in_domain" if similarity >= in_threshold else "borderline" if similarity >= borderline_threshold else "out_of_domain"
+        endpoints.append({
+            "id": endpoint_id, "status": status, "nearestNeighborTanimoto": similarity,
+            "thresholds": {"inDomain": in_threshold, "borderline": borderline_threshold},
+            "calibrationEvidence": evidence,
+        })
+    return {
+        "schemaVersion": "axiom-admet-applicability.v1",
+        "modelRevision": registry.get("modelRevision"),
+        "registrySha256": hashlib.sha256(json.dumps(registry, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest(),
+        "fingerprint": {"type": "Morgan", "radius": radius, "bits": bits, "metric": "Tanimoto nearest neighbor"},
+        "endpoints": endpoints,
+        "boundary": "Domain status is endpoint-specific and only as valid as the configured reference set, split, thresholds, and calibration evidence.",
+    }
 
 
 def _catalog(kind: FilterCatalogParams.FilterCatalogs) -> FilterCatalog:
@@ -410,20 +469,49 @@ def _vina_affinity(output: str) -> float | None:
     return None
 
 
-def _execute_vina(binary: str, receptor: Path, ligand: Path, output: Path, payload: DockingRunInput) -> dict[str, Any]:
+def _execute_vina(binary: str, receptor: Path, ligand: Path, output: Path, payload: DockingRunInput, seed: int) -> dict[str, Any]:
     command = [
         binary, "--receptor", str(receptor), "--ligand", str(ligand),
         "--center_x", str(payload.center.x), "--center_y", str(payload.center.y), "--center_z", str(payload.center.z),
         "--size_x", str(payload.size.x), "--size_y", str(payload.size.y), "--size_z", str(payload.size.z),
-        "--exhaustiveness", str(payload.exhaustiveness), "--seed", str(payload.seed), "--out", str(output),
+        "--exhaustiveness", str(payload.exhaustiveness), "--seed", str(seed), "--out", str(output),
     ]
+    started = time.monotonic()
     completed = subprocess.run(command, capture_output=True, text=True, timeout=900, check=False)
     if completed.returncode != 0:
         raise HTTPException(status_code=422, detail="AutoDock Vina rejected the prepared docking inputs.")
     affinity = _vina_affinity(completed.stdout)
     if affinity is None or not output.is_file():
         raise HTTPException(status_code=422, detail="AutoDock Vina did not produce a parseable scored pose.")
-    return {"bestAffinity": affinity, "poseArtifact": str(output.relative_to(ROOT)), "stdoutTail": completed.stdout.splitlines()[-12:]}
+    return {
+        "bestAffinity": affinity,
+        "poseArtifact": str(output.relative_to(ROOT)),
+        "stdoutTail": completed.stdout.splitlines()[-12:],
+        "seed": seed,
+        "wallTimeSeconds": round(time.monotonic() - started, 3),
+        "command": command,
+    }
+
+
+def _replicate_vina(binary: str, receptor: Path, ligand: Path, output_stem: str, payload: DockingRunInput) -> dict[str, Any]:
+    runs = []
+    for index in range(payload.replicates):
+        seed = payload.seed + index
+        output = ARTIFACT_ROOT / f"{output_stem}-seed-{seed}.pdbqt"
+        runs.append(_execute_vina(binary, receptor, ligand, output, payload, seed))
+    affinities = [run["bestAffinity"] for run in runs]
+    deviation = statistics.pstdev(affinities)
+    return {
+        "bestAffinity": min(affinities),
+        "meanAffinity": statistics.mean(affinities),
+        "affinityStandardDeviation": deviation,
+        "replicates": runs,
+        "stability": {
+            "status": "pass" if deviation <= 1.0 else "fail",
+            "thresholdKcalMol": 1.0,
+            "method": "population standard deviation across deterministic Vina seed replicates",
+        },
+    }
 
 
 @app.post("/docking/run")
@@ -435,8 +523,7 @@ def run_docking(payload: DockingRunInput) -> dict[str, Any]:
     prepared = prepare_docking(payload)
     ligand = ROOT / prepared["ligandArtifact"]
     structure_hash = hashlib.sha256(prepared["canonicalSmiles"].encode("utf-8")).hexdigest()
-    pose_path = ARTIFACT_ROOT / f"{structure_hash}-vina-poses.pdbqt"
-    docked = _execute_vina(vina_binary, receptor, ligand, pose_path, payload)
+    docked = _replicate_vina(vina_binary, receptor, ligand, f"{structure_hash}-vina-candidate", payload)
     control = {"status": "not_supplied", "boundary": "No known-ligand control was supplied."}
     if payload.control_smiles:
         control_payload = DockingPreparationInput(
@@ -447,25 +534,36 @@ def run_docking(payload: DockingRunInput) -> dict[str, Any]:
         control_prepared = prepare_docking(control_payload)
         control_ligand = ROOT / control_prepared["ligandArtifact"]
         control_hash = hashlib.sha256(control_prepared["canonicalSmiles"].encode("utf-8")).hexdigest()
-        control_output = ARTIFACT_ROOT / f"{control_hash}-vina-control-poses.pdbqt"
-        control_run = _execute_vina(vina_binary, receptor, control_ligand, control_output, payload)
+        control_run = _replicate_vina(vina_binary, receptor, control_ligand, f"{control_hash}-vina-control", payload)
         control = {
             "status": "score_control_completed",
             "knownLigandSmiles": control_prepared["canonicalSmiles"],
             "bestAffinity": control_run["bestAffinity"],
-            "poseArtifact": control_run["poseArtifact"],
+            "meanAffinity": control_run["meanAffinity"],
+            "affinityStandardDeviation": control_run["affinityStandardDeviation"],
+            "replicates": control_run["replicates"],
+            "stability": control_run["stability"],
             "boundary": "This is a same-box score control, not RMSD redocking validation unless an experimental reference pose is separately supplied and aligned.",
         }
+    version = subprocess.run([vina_binary, "--version"], capture_output=True, text=True, timeout=10, check=False).stdout.strip()
     result = {
         "schemaVersion": "vina-docking.v1",
         "status": "completed",
         "canonicalSmiles": prepared["canonicalSmiles"],
         "receptorId": payload.receptor_id,
         "bestAffinity": docked["bestAffinity"],
-        "poseArtifact": docked["poseArtifact"],
+        "meanAffinity": docked["meanAffinity"],
+        "affinityStandardDeviation": docked["affinityStandardDeviation"],
+        "replicates": docked["replicates"],
+        "stability": docked["stability"],
         "control": control,
         "config": prepared["config"],
-        "provenance": {"provider": "AutoDock Vina", "binary": vina_binary, "seed": payload.seed, "execution": "local_subprocess"},
+        "provenance": {
+            "provider": "AutoDock Vina", "binary": vina_binary, "engineVersion": version,
+            "baseSeed": payload.seed, "replicateCount": payload.replicates,
+            "receptorSha256": hashlib.sha256(receptor.read_bytes()).hexdigest(),
+            "execution": "local_subprocess",
+        },
         "boundary": "Docking poses and scores are computational prioritization signals, not experimental binding validation.",
     }
     result_path = ARTIFACT_ROOT / f"{structure_hash}-vina-result.json"

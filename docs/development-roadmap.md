@@ -2,6 +2,20 @@
 
 This roadmap is the authoritative backlog for moving Axiom Observatory from a local proof of concept to a scientifically defensible campaign system. A feature is not `complete` because a binary, endpoint, or model is installed. It is complete only when its inputs, execution, controls, provenance, failure states, validation evidence, and human review are implemented together.
 
+## Implementation checkpoint — 2026-08-03
+
+The campaign platform now has an operational Supabase queue, lease heartbeats and retry exhaustion, content-addressed artifact upload, per-job versioned manifests, candidate ranking, human review, and provenance-required assay-result ingestion. Phase I and Phase II views are strict readiness audits; they do not produce simulated clinical results.
+
+The open-source execution adapters are implemented for RDKit, ADMET-AI, AutoDock Vina, and AiZynthFinder. Their scientific availability remains input-gated:
+
+- Vina runs deterministic seed replicates and a same-box ligand control, records receptor and artifact hashes, and excludes docking from ranking when the control/stability policy fails. Crystallographic RMSD and benchmark enrichment are not yet available.
+- ADMET applicability is endpoint-specific only when a reviewed `axiom-admet-domain-registry.v1` is configured. Without real reference chemistry and calibration evidence, predictions are marked `not_evaluable` and excluded from ranking.
+- AiZynthFinder runs only with an installed binary plus pinned policy and stock configuration. BRICS remains clearly labelled as fragment analysis, not route planning.
+- Assay results retain source values, qualifiers, QC state, controls, and provenance. Bulk CSV, unit normalization, raw-file artifacts, and prediction-versus-measurement monitoring remain open.
+- PK-Sim/MoBi, nlmixr2/rxode2, and Phase II statistical engines are not installed. Their execution remains blocked behind qualified preclinical and human-data gates.
+
+This checkpoint advances the software architecture, but it does not satisfy the scientific “done when” criteria below until benchmark datasets, licensed inputs, qualified model registries, and domain review are supplied.
+
 ## Product invariant
 
 Axiom must distinguish retrieved evidence, upstream ranking signals, computational predictions, experimental measurements, and clinical observations. Computational output never becomes experimental or clinical evidence through workflow progression. Missing inputs block execution; they do not produce defaults that resemble scientific results.

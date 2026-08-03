@@ -164,6 +164,21 @@ test("campaign schema provides a tenant-safe durable chemistry queue and human r
   assert.match(sql, /evidence_snapshot/i);
 });
 
+test("campaign worker controls and assay ingestion fail closed with tenant boundaries", async () => {
+  const controls = await readFile(new URL("../supabase/migrations/20260803110000_campaign_worker_controls.sql", import.meta.url), "utf8");
+  assert.match(controls, /alter type public\.job_status add value if not exists 'blocked'/i);
+  assert.match(controls, /create or replace function public\.heartbeat_campaign_job_v1/i);
+  assert.match(controls, /attempts >= max_attempts/i);
+  assert.match(controls, /auth\.role\(\) <> 'service_role'/i);
+
+  const assays = await readFile(new URL("../supabase/migrations/20260803112000_assay_results.sql", import.meta.url), "utf8");
+  assert.match(assays, /create table public\.assay_results/i);
+  assert.match(assays, /foreign key \(candidate_id, run_id, workspace_id\)/i);
+  assert.match(assays, /alter table public\.assay_results enable row level security/i);
+  assert.match(assays, /provenance sourceReference is required/i);
+  assert.match(assays, /grant execute on function public\.ingest_assay_result_v1\(uuid,jsonb\) to authenticated/i);
+});
+
 test("browser environment example keeps Google sign-in disabled by default", async () => {
   const envExample = await readFile(envExampleUrl, "utf8");
   assert.match(envExample, /^VITE_SUPABASE_GOOGLE_ENABLED=false$/m);

@@ -32,6 +32,7 @@ export const api = {
   addCampaignCandidate: (id, input, accessToken) => request(`/api/campaigns/${encodeURIComponent(id)}/candidates`, { method: "POST", body: JSON.stringify(input), accessToken }),
   queueCandidate: (id, accessToken) => request(`/api/candidates/${encodeURIComponent(id)}/queue`, { method: "POST", body: "{}", accessToken }),
   reviewCandidate: (id, input, accessToken) => request(`/api/candidates/${encodeURIComponent(id)}/reviews`, { method: "POST", body: JSON.stringify(input), accessToken }),
+  ingestAssay: (id, input, accessToken) => request(`/api/candidates/${encodeURIComponent(id)}/assays`, { method: "POST", body: JSON.stringify(input), accessToken }),
   getValidationPlan: (id, accessToken) => request(`/api/runs/${encodeURIComponent(id)}/validation-plan`, { accessToken }),
   chemistryHealth: () => request("/api/chemistry/health"),
   prepareMolecule: (input) => request("/api/chemistry/prepare", { method: "POST", body: JSON.stringify(input) }),
