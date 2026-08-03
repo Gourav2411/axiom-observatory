@@ -23,7 +23,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     AXIOM_CHEMISTRY_PORT=8791
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgomp1 libstdc++6 \
+    && apt-get install -y --no-install-recommends \
+        libgomp1 \
+        libsm6 \
+        libstdc++6 \
+        libxext6 \
+        libxrender1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
