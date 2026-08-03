@@ -6,6 +6,7 @@ const server = await readFile(new URL("../scripts/serve-production.mjs", import.
 const launcher = await readFile(new URL("../scripts/start-production.mjs", import.meta.url), "utf8");
 const dockerfile = await readFile(new URL("../deploy/Dockerfile", import.meta.url), "utf8");
 const blueprint = await readFile(new URL("../render.yaml", import.meta.url), "utf8");
+const chemistryWorker = await readFile(new URL("../services/chemistry_worker.py", import.meta.url), "utf8");
 
 test("production server serves the SPA and protects computational chemistry", () => {
   assert.match(server, /dist\/client/);
@@ -23,6 +24,8 @@ test("production container co-locates the auditable POC processes", () => {
   assert.match(dockerfile, /requirements-admet\.txt/);
   assert.match(dockerfile, /libxrender1/);
   assert.match(dockerfile, /libexpat1/);
+  assert.doesNotMatch(chemistryWorker, /^from admet_ai import/m);
+  assert.match(chemistryWorker, /lazy_on_first_prediction/);
   assert.match(dockerfile, /libxext6/);
   assert.match(dockerfile, /libsm6/);
   assert.match(dockerfile, /start-production\.mjs/);

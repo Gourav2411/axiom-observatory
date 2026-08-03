@@ -7,6 +7,7 @@ does not claim that predictions are measurements or experimental validation.
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
 import os
 import re
@@ -26,14 +27,11 @@ from rdkit.Chem.FilterCatalog import FilterCatalog, FilterCatalogParams
 from rdkit.Chem.MolStandardize import rdMolStandardize
 
 try:
-    from admet_ai import ADMETModel, __version__ as ADMET_VERSION
-    from admet_ai.admet_info import get_admet_info
-
+    ADMET_VERSION = importlib.metadata.version("admet-ai")
     ADMET_IMPORT_ERROR = None
-except Exception as error:  # pragma: no cover - environment diagnostic
-    ADMETModel = None
+except importlib.metadata.PackageNotFoundError:
     ADMET_VERSION = None
-    ADMET_IMPORT_ERROR = str(error)
+    ADMET_IMPORT_ERROR = "ADMET-AI is not installed."
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +42,7 @@ RECEPTOR_ROOT.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="Axiom local chemistry worker", version="0.1.0")
 _admet_model: Any = None
+_admet_info_loader: Any = None
 _admet_lock = threading.Lock()
 
 
@@ -228,11 +227,12 @@ def health() -> dict[str, Any]:
                 "mode": "local_cpu",
             },
             "admet": {
-                "available": ADMETModel is not None,
+                "available": ADMET_VERSION is not None,
                 "provider": "ADMET-AI",
                 "version": ADMET_VERSION,
                 "mode": "local_cpu_model_inference",
                 "reason": ADMET_IMPORT_ERROR,
+                "loading": "lazy_on_first_prediction",
             },
             "docking": {
                 "available": bool(vina_binary),
@@ -322,14 +322,22 @@ def prepare(payload: MoleculeInput) -> dict[str, Any]:
     return response
 
 
-def _get_admet_model() -> Any:
-    global _admet_model
-    if ADMETModel is None:
+def _get_admet_components() -> tuple[Any, Any]:
+    global _admet_model, _admet_info_loader, ADMET_IMPORT_ERROR
+    if ADMET_VERSION is None:
         raise HTTPException(status_code=503, detail=ADMET_IMPORT_ERROR or "ADMET-AI is unavailable.")
     with _admet_lock:
         if _admet_model is None:
-            _admet_model = ADMETModel(num_workers=0)
-    return _admet_model
+            try:
+                from admet_ai import ADMETModel
+                from admet_ai.admet_info import get_admet_info
+
+                _admet_model = ADMETModel(num_workers=0)
+                _admet_info_loader = get_admet_info
+            except Exception as error:
+                ADMET_IMPORT_ERROR = str(error)
+                raise HTTPException(status_code=503, detail=f"ADMET-AI could not be loaded: {error}") from error
+    return _admet_model, _admet_info_loader
 
 
 @app.post("/admet")
@@ -339,7 +347,8 @@ def admet(payload: PredictionInput) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail="RDKit could not parse this SMILES structure.")
     canonical_smiles = Chem.MolToSmiles(molecule, canonical=True, isomericSmiles=True)
     started = time.perf_counter()
-    predictions = _get_admet_model().predict(canonical_smiles)
+    model, get_admet_info = _get_admet_components()
+    predictions = model.predict(canonical_smiles)
     metadata = get_admet_info().set_index("id").to_dict(orient="index")
     endpoints = []
     for endpoint_id, raw_value in predictions.items():
