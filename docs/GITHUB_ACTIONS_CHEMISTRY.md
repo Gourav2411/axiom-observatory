@@ -14,7 +14,8 @@ Configure these under **GitHub repository → Settings → Secrets and variables
 
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
-- `AXIOM_ARTIFACT_SIGNING_KEY`
+
+`AXIOM_ARTIFACT_SIGNING_KEY` is optional. Until the same key is deliberately configured in Render and GitHub, GitHub-compute manifests are truthfully marked `unsigned_no_signing_key`.
 
 The service-role key is used only by the private workflow to lease and complete jobs. The workflow has repository `contents: read` permission and never prints secret values.
 
