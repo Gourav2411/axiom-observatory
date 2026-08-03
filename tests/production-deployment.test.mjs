@@ -22,6 +22,7 @@ test("production container co-locates the auditable POC processes", () => {
   assert.match(dockerfile, /FROM python:3\.12-slim AS runtime/);
   assert.match(dockerfile, /requirements-admet\.txt/);
   assert.match(dockerfile, /libxrender1/);
+  assert.match(dockerfile, /libexpat1/);
   assert.match(dockerfile, /libxext6/);
   assert.match(dockerfile, /libsm6/);
   assert.match(dockerfile, /start-production\.mjs/);

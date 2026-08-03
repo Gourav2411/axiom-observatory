@@ -24,6 +24,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        libexpat1 \
         libgomp1 \
         libsm6 \
         libstdc++6 \
