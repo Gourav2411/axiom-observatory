@@ -4,9 +4,16 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { loadEnv } from "vite";
+import { boundedWorkerError, normalizeSupabaseProjectUrl } from "./campaign-config.mjs";
 
 const fileEnv = loadEnv(process.env.NODE_ENV || "development", process.cwd(), "");
-const supabaseUrl = process.env.SUPABASE_URL || fileEnv.SUPABASE_URL;
+let configurationError = null;
+let supabaseUrl = "";
+try {
+  supabaseUrl = normalizeSupabaseProjectUrl(process.env.SUPABASE_URL || fileEnv.SUPABASE_URL);
+} catch (error) {
+  configurationError = error;
+}
 const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || fileEnv.SUPABASE_SERVICE_ROLE_KEY;
 const chemistryUrl = (process.env.AXIOM_CHEMISTRY_URL || fileEnv.AXIOM_CHEMISTRY_URL || "http://127.0.0.1:8791").replace(/\/+$/, "");
 const workerId = `local-campaign-${randomUUID()}`;
@@ -262,14 +269,17 @@ async function cycle() {
       const outcome = await executeWithHeartbeat(job);
       await complete(job, await persistOutcomeArtifacts(job, outcome));
     } catch (jobError) {
-      console.error(`Campaign job ${job.job_type} failed:`, jobError.message);
-      await complete(job, null, jobError).catch((completionError) => console.error("Unable to record campaign job failure:", completionError.message));
+      console.error(`Campaign job ${job.job_type} failed:`, boundedWorkerError(jobError));
+      await complete(job, null, jobError).catch((completionError) => console.error("Unable to record campaign job failure:", boundedWorkerError(completionError)));
     }
   }
   return jobs?.length || 0;
 }
 
-if (!supabase) {
+if (configurationError) {
+  console.error("Campaign worker configuration error:", boundedWorkerError(configurationError));
+  process.exitCode = 1;
+} else if (!supabase) {
   console.warn("Campaign worker is disabled because Supabase server credentials are not configured.");
 } else {
   console.log(`Campaign worker ${workerId} connected.`);
@@ -278,7 +288,7 @@ if (!supabase) {
       const processed = await cycle();
       if (!processed) await wait(pollMs);
     } catch (error) {
-      console.error("Campaign worker polling failed:", error.message);
+      console.error("Campaign worker polling failed:", boundedWorkerError(error));
       await wait(Math.max(pollMs, 5_000));
     }
   }
