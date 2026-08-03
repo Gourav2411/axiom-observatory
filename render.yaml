@@ -32,8 +32,6 @@ services:
         value: Gourav2411/axiom-observatory
       - key: GITHUB_ACTIONS_REF
         value: main
-      - key: GITHUB_ACTIONS_TOKEN
-        sync: false
     disk:
       name: axiom-compute-artifacts
       mountPath: /app/services/artifacts
