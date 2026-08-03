@@ -1,5 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
-import { randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import process from "node:process";
 import { loadEnv } from "vite";
 
@@ -9,11 +11,113 @@ const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || fileEnv.SUPABASE
 const chemistryUrl = (process.env.AXIOM_CHEMISTRY_URL || fileEnv.AXIOM_CHEMISTRY_URL || "http://127.0.0.1:8791").replace(/\/+$/, "");
 const workerId = `local-campaign-${randomUUID()}`;
 const pollMs = Number(process.env.AXIOM_CAMPAIGN_POLL_MS || 2_000);
+const artifactSigningKey = process.env.AXIOM_ARTIFACT_SIGNING_KEY || fileEnv.AXIOM_ARTIFACT_SIGNING_KEY || "";
 const supabase = supabaseUrl && serviceRoleKey
   ? createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false, autoRefreshToken: false } })
   : null;
 
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  return JSON.stringify(value);
+}
+
+const sha256 = (value) => createHash("sha256").update(value).digest("hex");
+
+function collectLocalArtifacts(value, found = new Set()) {
+  if (typeof value === "string" && value.startsWith("services/artifacts/")) found.add(value);
+  else if (Array.isArray(value)) value.forEach((item) => collectLocalArtifacts(item, found));
+  else if (value && typeof value === "object") Object.values(value).forEach((item) => collectLocalArtifacts(item, found));
+  return [...found];
+}
+
+async function registerArtifact(job, bytes, fileName, mimeType, metadata) {
+  const digest = sha256(bytes);
+  const objectPath = `${job.workspace_id}/${job.run_id}/${job.id}/${digest}-${path.basename(fileName)}`;
+  const { error: uploadError } = await supabase.storage.from("run-artifacts").upload(objectPath, bytes, {
+    contentType: mimeType,
+    upsert: false,
+  });
+  if (uploadError && !/already exists|duplicate/i.test(uploadError.message || "")) throw uploadError;
+  const { error: rowError } = await supabase.from("artifacts").upsert({
+    workspace_id: job.workspace_id,
+    run_id: job.run_id,
+    job_id: job.id,
+    bucket_id: "run-artifacts",
+    object_path: objectPath,
+    sha256: digest,
+    mime_type: mimeType,
+    byte_size: bytes.length,
+    metadata,
+  }, { onConflict: "bucket_id,object_path", ignoreDuplicates: true });
+  if (rowError) throw rowError;
+  return { bucketId: "run-artifacts", objectPath, sha256: digest, byteSize: bytes.length, mimeType };
+}
+
+async function persistOutcomeArtifacts(job, outcome) {
+  const artifactRoot = path.resolve(process.cwd(), "services/artifacts");
+  const files = [];
+  for (const relativePath of collectLocalArtifacts(outcome.result)) {
+    const absolutePath = path.resolve(process.cwd(), relativePath);
+    if (!absolutePath.startsWith(`${artifactRoot}${path.sep}`)) throw new Error("Worker artifact escaped the configured artifact root");
+    const bytes = await readFile(absolutePath);
+    const extension = path.extname(absolutePath).toLowerCase();
+    const mimeType = extension === ".json" ? "application/json" : extension === ".sdf" ? "chemical/x-mdl-sdfile" : extension === ".pdbqt" ? "chemical/x-pdbqt" : "application/octet-stream";
+    files.push(await registerArtifact(job, bytes, path.basename(absolutePath), mimeType, {
+      schemaVersion: "axiom-artifact.v1",
+      jobType: job.job_type,
+      workerId,
+      localSourcePath: relativePath,
+    }));
+  }
+  const manifest = {
+    schemaVersion: "axiom-campaign-manifest.v1",
+    jobId: job.id,
+    runId: job.run_id,
+    workspaceId: job.workspace_id,
+    jobType: job.job_type,
+    workerId,
+    attempt: job.attempts,
+    inputSha256: sha256(canonicalJson(job.payload || {})),
+    outputSha256: sha256(canonicalJson(outcome.result || {})),
+    boundary: outcome.boundary,
+    applicability: outcome.applicability,
+    provenance: outcome.result?.provenance || null,
+    files,
+    createdAt: new Date().toISOString(),
+  };
+  const manifestBody = canonicalJson(manifest);
+  const signature = artifactSigningKey ? createHmac("sha256", artifactSigningKey).update(manifestBody).digest("hex") : null;
+  const signedManifest = { ...manifest, signature: signature ? { algorithm: "hmac-sha256", value: signature } : { algorithm: null, value: null, status: "unsigned_no_signing_key" } };
+  const manifestArtifact = await registerArtifact(job, Buffer.from(JSON.stringify(signedManifest, null, 2)), "manifest.json", "application/json", {
+    schemaVersion: signedManifest.schemaVersion,
+    kind: "job_manifest",
+    jobType: job.job_type,
+    signatureStatus: signature ? "signed" : "unsigned_no_signing_key",
+  });
+  return {
+    ...outcome,
+    result: {
+      ...outcome.result,
+      durableArtifacts: files,
+      artifactManifest: { ...manifestArtifact, signatureStatus: signature ? "signed" : "unsigned_no_signing_key" },
+    },
+  };
+}
+
+async function executeWithHeartbeat(job) {
+  const heartbeat = setInterval(() => {
+    supabase.rpc("heartbeat_campaign_job_v1", { p_job_id: job.id, p_worker_id: workerId, p_lease_seconds: 600 })
+      .then(({ error }) => { if (error) console.error(`Campaign heartbeat failed for ${job.id}:`, error.message); });
+  }, 60_000);
+  try {
+    return await execute(job);
+  } finally {
+    clearInterval(heartbeat);
+  }
+}
 
 async function chemistry(path, body) {
   const response = await fetch(`${chemistryUrl}${path}`, {
@@ -59,24 +163,12 @@ function prepScore(result) {
   return { eligible: true, points: Math.max(0, qed * 20 + lipinski - alertPenalty), maxPoints: 25, method: "QED + Lipinski − structural-alert penalty" };
 }
 
-function admetScore(result) {
+function admetScore(result, applicability) {
   const endpoints = new Map((result.endpoints || []).map((item) => [String(item.id).toLowerCase(), Number(item.value)]));
-  const risks = ["herg", "ames", "dili", "clintox"].map((id) => ({ id, probability: endpoints.get(id) })).filter((item) => Number.isFinite(item.probability));
+  const supported = new Set((applicability?.endpoints || []).filter((item) => ["in_domain", "borderline"].includes(item.status)).map((item) => String(item.id).toLowerCase()));
+  const risks = ["herg", "ames", "dili", "clintox"].map((id) => ({ id, probability: endpoints.get(id) })).filter((item) => Number.isFinite(item.probability) && supported.has(item.id));
   const meanRisk = risks.length ? risks.reduce((sum, item) => sum + item.probability, 0) / risks.length : 1;
-  return { eligible: risks.length > 0, points: Math.max(0, (1 - meanRisk) * 45), maxPoints: 45, method: "inverse mean predicted hERG/Ames/DILI/ClinTox positive-class probability", risks };
-}
-
-function admetApplicability(result) {
-  const endpoints = result.endpoints || [];
-  const supported = endpoints.filter((item) => Number.isFinite(item.performance?.auroc) || Number.isFinite(item.performance?.r2) || Number.isFinite(item.performance?.mae)).length;
-  return {
-    status: "performance_metadata_only",
-    method: "endpoint performance-metadata coverage",
-    coverage: endpoints.length ? supported / endpoints.length : 0,
-    supportedEndpoints: supported,
-    totalEndpoints: endpoints.length,
-    limitation: "Endpoint benchmark metadata does not establish whether this molecule lies inside any model's training domain.",
-  };
+  return { eligible: risks.length > 0, points: Math.max(0, (1 - meanRisk) * 45), maxPoints: 45, method: risks.length ? "inverse mean predicted risk for endpoint predictions passing calibrated domain policy" : "excluded: no risk endpoint passed a calibrated applicability-domain policy", risks };
 }
 
 function fragmentScore(result) {
@@ -106,7 +198,14 @@ async function execute(job) {
   }
   if (job.job_type === "admet") {
     const result = await chemistry("/admet", { smiles });
-    return { status: "succeeded", result, applicability: admetApplicability(result), score: admetScore(result), boundary: result.boundary };
+    let applicability;
+    try {
+      applicability = await chemistry("/applicability/admet", { smiles });
+    } catch (error) {
+      if (error.status !== 503) throw error;
+      applicability = { status: "not_evaluable", endpoints: [], reason: error.message, limitation: "ADMET predictions are excluded from ranking until a calibrated endpoint-specific domain registry is configured." };
+    }
+    return { status: "succeeded", result: { ...result, applicability }, applicability, score: admetScore(result, applicability), boundary: result.boundary };
   }
   if (job.job_type === "docking_prepare") {
     if (!settings.receptorId || !settings.center || !settings.size) return blockedResult(job, "Receptor and explicit pocket box are required.", "receptorId, center and size");
@@ -116,9 +215,10 @@ async function execute(job) {
   if (job.job_type === "docking_score") {
     if (!settings.receptorPath || !settings.receptorId || !settings.center || !settings.size) return blockedResult(job, "Actual docking needs a prepared receptor PDBQT path and explicit pocket box.", "receptorPath, receptorId, center and size");
     try {
-      const result = await chemistry("/docking/run", { smiles, receptor_id: settings.receptorId, receptor_path: settings.receptorPath, center: settings.center, size: settings.size, exhaustiveness: settings.exhaustiveness || 8, seed: settings.seed || 20260803, control_smiles: settings.controlSmiles || null });
+      const result = await chemistry("/docking/run", { smiles, receptor_id: settings.receptorId, receptor_path: settings.receptorPath, center: settings.center, size: settings.size, exhaustiveness: settings.exhaustiveness || 8, seed: settings.seed || 20260803, replicates: settings.dockingReplicates || 3, control_smiles: settings.controlSmiles || null });
       const affinity = Number(result.bestAffinity);
-      return { status: "succeeded", result, applicability: result.control || { status: "control_not_supplied" }, score: { eligible: Number.isFinite(affinity), points: Number.isFinite(affinity) ? Math.max(0, Math.min(15, -affinity * 1.5)) : 0, maxPoints: 15, method: "bounded Vina affinity prioritization signal" }, boundary: result.boundary };
+      const controlPassed = result.control?.status === "score_control_completed" && result.control?.stability?.status === "pass" && result.stability?.status === "pass";
+      return { status: "succeeded", result, applicability: { ...result.control, candidateStability: result.stability, status: controlPassed ? "same_box_control_passed" : result.control?.status === "not_supplied" ? "control_not_supplied" : "control_policy_failed", limitation: "Same-box score controls and replicate stability do not establish crystallographic redocking validity or binding." }, score: { eligible: controlPassed && Number.isFinite(affinity), points: controlPassed && Number.isFinite(affinity) ? Math.max(0, Math.min(15, -affinity * 1.5)) : 0, maxPoints: 15, method: controlPassed ? "bounded Vina affinity prioritization signal after replicate/control policy" : "excluded: required docking control and replicate-stability policy did not pass" }, boundary: result.boundary };
     } catch (error) {
       if (error.status === 503 || error.status === 422) return blockedResult(job, error.message, "compatible Vina binary, prepared receptor and valid control inputs");
       throw error;
@@ -159,7 +259,8 @@ async function cycle() {
   if (error) throw error;
   for (const job of jobs || []) {
     try {
-      await complete(job, await execute(job));
+      const outcome = await executeWithHeartbeat(job);
+      await complete(job, await persistOutcomeArtifacts(job, outcome));
     } catch (jobError) {
       console.error(`Campaign job ${job.job_type} failed:`, jobError.message);
       await complete(job, null, jobError).catch((completionError) => console.error("Unable to record campaign job failure:", completionError.message));

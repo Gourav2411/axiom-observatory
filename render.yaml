@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: axiom-observatory
+    runtime: docker
+    dockerfilePath: ./deploy/Dockerfile
+    autoDeployTrigger: commit
+    healthCheckPath: /api/health
+    domains:
+      - axiom.yomexa.xyz
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: VITE_SUPABASE_URL
+        sync: false
+      - key: VITE_SUPABASE_PUBLISHABLE_KEY
+        sync: false
+      - key: VITE_SUPABASE_GOOGLE_ENABLED
+        value: "true"
+      - key: AXIOM_ARTIFACT_SIGNING_KEY
+        generateValue: true
+      - key: AXIOM_CAMPAIGN_POLL_MS
+        value: "2000"
+    disk:
+      name: axiom-compute-artifacts
+      mountPath: /app/services/artifacts
+      sizeGB: 10

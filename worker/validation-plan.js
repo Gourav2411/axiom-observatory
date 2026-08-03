@@ -106,7 +106,7 @@ function configuredWorker(env, worker) {
     expectedArtifacts: worker.expectedArtifacts,
     outputBoundary: worker.outputBoundary,
     reason: endpoint
-      ? "Worker endpoint is registered. Local execution may be available in the Validation workbench; durable queue leasing and Supabase artifact persistence remain production gates."
+      ? "Worker endpoint is registered with durable leasing, retry budgets, and content-addressed artifact manifests. Availability still depends on the job-specific engine, inputs, controls, and calibrated model assets."
       : `Set ${worker.envKey} to register this worker. No predictions or simulations are produced until a worker is configured and executed.`,
   };
 }

@@ -12,6 +12,8 @@ test("local chemistry worker exposes real preparation and prediction boundaries"
   assert.match(service, /ADMETModel/);
   assert.match(service, /not measured safety, toxicity, exposure, or clinical outcomes/i);
   assert.match(service, /RDKit ETKDGv3 \+ MMFF94/);
+  assert.match(service, /@app\.post\("\/applicability\/admet"\)/);
+  assert.match(service, /axiom-admet-domain-registry\.v1/);
 });
 
 test("docking and retrosynthesis paths cannot fabricate engine outputs", () => {
@@ -24,14 +26,19 @@ test("docking and retrosynthesis paths cannot fabricate engine outputs", () => {
   assert.match(service, /subprocess\.run/);
   assert.match(service, /No compatible AutoDock Vina binary is registered/i);
   assert.match(service, /AiZynthFinder route planning requires a binary/i);
+  assert.match(service, /affinityStandardDeviation/);
+  assert.match(service, /receptorSha256/);
+  assert.match(service, /not RMSD redocking validation/i);
 });
 
 test("frontend exposes every local chemistry operation", () => {
-  for (const operation of ["prepareMolecule", "predictAdmet", "prepareDocking", "fragmentRetrosynthesis", "listCampaigns", "queueCandidate", "reviewCandidate"]) {
+  for (const operation of ["prepareMolecule", "predictAdmet", "prepareDocking", "fragmentRetrosynthesis", "listCampaigns", "queueCandidate", "reviewCandidate", "registerTranslationInput", "reviewTranslationInput"]) {
     assert.match(api, new RegExp(operation));
   }
   assert.match(ui, /Open-source validation workbench/);
   assert.match(ui, /COMPUTATIONAL PREDICTION/);
   assert.match(ui, /Asynchronous discovery campaign/);
   assert.match(ui, /Real execution, capability-gated/);
+  assert.match(ui, /Phase I and Phase II simulation readiness/);
+  assert.match(ui, /Run simulation · blocked/);
 });

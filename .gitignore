@@ -9,6 +9,7 @@ supabase/.temp/
 .venv/
 .venv-admet/
 .venv-retro/
+.runtime/
 .cache/
 services/artifacts/
 __pycache__/

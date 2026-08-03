@@ -965,6 +965,64 @@ async function handleApi(request, env = {}) {
     }
   }
 
+  const candidateAssayMatch = url.pathname.match(/^\/api\/candidates\/([^/]+)\/assays$/);
+  if (candidateAssayMatch && request.method === "POST") {
+    let input;
+    try { input = await request.json(); } catch { return apiError("invalid_json", "Request body must be valid JSON", 400); }
+    const validNumber = typeof input?.value === "number" && Number.isFinite(input.value);
+    const validText = [input?.assayType, input?.endpoint, input?.unit, input?.provenance?.sourceReference].every((value) => typeof value === "string" && value.trim());
+    if (!validNumber || !validText) {
+      return apiError("invalid_input", "Assay type, endpoint, finite numeric value, unit, and provenance source reference are required", 400);
+    }
+    try {
+      const principal = await authenticateSupabaseRequest(request, env);
+      return json(await createCampaignRepository(env, principal).ingestAssay(candidateAssayMatch[1], input), 201);
+    } catch (error) {
+      const handled = handledInfrastructureError(error);
+      if (handled) return handled;
+      throw error;
+    }
+  }
+
+  const translationInputMatch = url.pathname.match(/^\/api\/candidates\/([^/]+)\/translation-inputs$/);
+  if (translationInputMatch && request.method === "POST") {
+    let input;
+    try { input = await request.json(); } catch { return apiError("invalid_json", "Request body must be valid JSON", 400); }
+    const phaseDomains = {
+      phase1: new Set(["identity", "formulation", "inVitroAdme", "animalPk", "toxicology", "exposureBasis"]),
+      phase2: new Set(["humanPk", "humanSafety", "pdBiomarker", "diseaseModel", "endpointModel"]),
+    };
+    if (!phaseDomains[input?.phase]?.has(input?.domain) || !["document", "measurement", "model", "observation"].includes(input?.inputKind)
+      || typeof input?.sourceReference !== "string" || input.sourceReference.trim().length < 2) {
+      return apiError("invalid_input", "A valid phase, evidence domain, input kind, and source reference are required", 400);
+    }
+    try {
+      const principal = await authenticateSupabaseRequest(request, env);
+      return json(await createCampaignRepository(env, principal).registerTranslationInput(translationInputMatch[1], input), 201);
+    } catch (error) {
+      const handled = handledInfrastructureError(error);
+      if (handled) return handled;
+      throw error;
+    }
+  }
+
+  const translationReviewMatch = url.pathname.match(/^\/api\/translation-inputs\/([^/]+)\/review$/);
+  if (translationReviewMatch && request.method === "POST") {
+    let input;
+    try { input = await request.json(); } catch { return apiError("invalid_json", "Request body must be valid JSON", 400); }
+    if (!["qualified", "rejected"].includes(input?.decision) || typeof input?.rationale !== "string" || input.rationale.trim().length < 3) {
+      return apiError("invalid_input", "A qualification decision and rationale of at least 3 characters are required", 400);
+    }
+    try {
+      const principal = await authenticateSupabaseRequest(request, env);
+      return json(await createCampaignRepository(env, principal).reviewTranslationInput(translationReviewMatch[1], input), 200);
+    } catch (error) {
+      const handled = handledInfrastructureError(error);
+      if (handled) return handled;
+      throw error;
+    }
+  }
+
   if (url.pathname === "/api/runs" && request.method === "POST") {
     let input;
     try { input = await request.json(); } catch { return apiError("invalid_json", "Request body must be valid JSON", 400); }
@@ -1078,4 +1136,4 @@ export default {
   },
 };
 
-export { handleApi, RUN_SCHEMA_VERSION };
+export { authenticateSupabaseRequest, handleApi, RUN_SCHEMA_VERSION };
