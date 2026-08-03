@@ -30,6 +30,8 @@ test("production container co-locates the auditable POC processes", () => {
 test("Render blueprint declares the Yomexa domain without embedding secrets", () => {
   assert.match(blueprint, /axiom\.yomexa\.xyz/);
   assert.match(blueprint, /healthCheckPath: \/api\/health/);
+  assert.equal((blueprint.match(/value: https:\/\/wmctadhdehnlqzltffun\.supabase\.co/g) || []).length, 2);
+  assert.doesNotMatch(blueprint, /supabase\.com\/dashboard/);
   for (const secret of ["SUPABASE_SERVICE_ROLE_KEY", "VITE_SUPABASE_PUBLISHABLE_KEY"]) {
     assert.match(blueprint, new RegExp(`${secret}\\n\\s+sync: false`));
   }
