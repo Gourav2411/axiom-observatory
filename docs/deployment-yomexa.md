@@ -43,8 +43,37 @@ In **Supabase Dashboard → Authentication → URL Configuration**:
 - Add redirect URL: `https://axiom.yomexa.xyz/reset-password`
 - Keep the four existing localhost/127.0.0.1 development redirects.
 
-For Google OAuth, retain the Supabase callback URI in Google Cloud and add `https://axiom.yomexa.xyz` as an authorized JavaScript origin if it is not already present.
+## 4. Update Google Sign-In
 
-## 4. Production boundary
+Google and Supabase use two different redirect layers. Google returns the user to
+Supabase; Supabase validates the OAuth response and then returns the user to Axiom.
+
+In **Google Auth Platform → Clients → the existing Web application client**:
+
+- Authorized JavaScript origin: `https://axiom.yomexa.xyz`
+- Authorized redirect URI: `https://wmctadhdehnlqzltffun.supabase.co/auth/v1/callback`
+
+Keep the Supabase callback URI exactly as shown. Do not replace it with
+`https://axiom.yomexa.xyz/auth/callback`; that application URL belongs in the
+Supabase redirect allow list from step 3.
+
+In **Google Auth Platform → Branding**:
+
+- Add `yomexa.xyz` as an authorized domain.
+- Set the application homepage to `https://axiom.yomexa.xyz` after deployment.
+- Before making the application public, publish a privacy-policy URL on the same
+  domain and add it to the consent-screen configuration.
+
+The existing Google Client ID and Client Secret remain configured only in
+**Supabase Dashboard → Authentication → Providers → Google**. Never add the
+Client Secret to the browser environment, GitHub repository, or Render build
+arguments.
+
+The application already calls `signInWithOAuth` with the current browser origin,
+so local development continues to use
+`http://localhost:4174/auth/callback`, while production automatically uses
+`https://axiom.yomexa.xyz/auth/callback`.
+
+## 5. Production boundary
 
 The deployment exposes authenticated RDKit and ADMET-AI operations. Vina, prepared receptor files, calibrated applicability registries, AiZynthFinder policies/stocks, and clinical simulation engines remain unavailable until their real assets are installed and validated. Public chemistry execution is authenticated through Supabase; only the health endpoint is anonymous.
