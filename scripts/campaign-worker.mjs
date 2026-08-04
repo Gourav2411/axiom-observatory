@@ -1,5 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { createHash, createHmac, randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
@@ -21,7 +22,7 @@ const computeUrl = (process.env.AXIOM_COMPUTE_URL || fileEnv.AXIOM_COMPUTE_URL |
 const internalWorkerKey = process.env.AXIOM_INTERNAL_WORKER_KEY || fileEnv.AXIOM_INTERNAL_WORKER_KEY || "";
 const workerId = `local-campaign-${randomUUID()}`;
 const pollMs = Number(process.env.AXIOM_CAMPAIGN_POLL_MS || 2_000);
-const allowedJobTypes = (process.env.AXIOM_CAMPAIGN_JOB_TYPES || fileEnv.AXIOM_CAMPAIGN_JOB_TYPES || "molecule_prep,admet,docking_prepare,docking_score,retrosynthesis_fragments,route_planning")
+const allowedJobTypes = (process.env.AXIOM_CAMPAIGN_JOB_TYPES || fileEnv.AXIOM_CAMPAIGN_JOB_TYPES || "molecule_prep,admet,docking_prepare,docking_score,retrosynthesis_fragments,route_planning,clinical_phase1_simulation,clinical_phase2_simulation")
   .split(",").map((value) => value.trim()).filter(Boolean);
 const oneShot = /^(1|true|yes)$/i.test(process.env.AXIOM_CAMPAIGN_ONESHOT || "");
 const maxJobs = Math.max(1, Math.min(Number(process.env.AXIOM_CAMPAIGN_MAX_JOBS || 20), 100));
@@ -163,6 +164,41 @@ async function chemistry(path, body) {
   return payload;
 }
 
+async function clinicalSimulation(job) {
+  const python = process.env.AXIOM_PYTHON_BINARY || fileEnv.AXIOM_PYTHON_BINARY || "python3";
+  const input = JSON.stringify({
+    jobId: job.id,
+    phase: job.payload?.phase,
+    mode: job.payload?.mode,
+    scenario: job.payload?.scenario,
+  });
+  return new Promise((resolve, reject) => {
+    const child = spawn(python, ["services/clinical_simulation.py"], { cwd: process.cwd(), stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    const append = (current, chunk) => {
+      const next = current + chunk;
+      if (next.length > 8_000_000) {
+        child.kill("SIGKILL");
+        throw new Error("Clinical simulation output exceeded the 8 MB safety limit");
+      }
+      return next;
+    };
+    child.stdout.on("data", (chunk) => { try { stdout = append(stdout, chunk); } catch (error) { reject(error); } });
+    child.stderr.on("data", (chunk) => { try { stderr = append(stderr, chunk); } catch (error) { reject(error); } });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code !== 0) return reject(new Error(`Clinical simulation worker exited ${code}: ${stderr.slice(-1000)}`));
+      try {
+        resolve(JSON.parse(stdout));
+      } catch {
+        reject(new Error("Clinical simulation worker returned invalid JSON"));
+      }
+    });
+    child.stdin.end(input);
+  });
+}
+
 async function durableReceptorPdbqt(reference) {
   if (!reference?.bucketId || !reference?.objectPath || !reference?.sha256) throw new Error("Durable receptor reference is incomplete");
   const { data, error } = await supabase.storage.from(reference.bucketId).download(reference.objectPath);
@@ -228,6 +264,20 @@ async function execute(job) {
   const payload = job.payload || {};
   const smiles = payload.smiles;
   const settings = payload.campaignSettings || {};
+  if (["clinical_phase1_simulation", "clinical_phase2_simulation"].includes(job.job_type)) {
+    const result = await clinicalSimulation(job);
+    return {
+      status: "succeeded",
+      result,
+      applicability: {
+        status: payload.mode === "evidence_qualified" ? "evidence_qualified_scenario" : "assumption_driven_research_scenario",
+        method: result.model?.method,
+        inputSha256: result.inputSha256,
+      },
+      score: { eligible: false, points: 0, maxPoints: 0, method: "Clinical model projections are excluded from discovery ranking" },
+      boundary: result.boundary,
+    };
+  }
   if (job.job_type === "molecule_prep") {
     const result = await chemistry("/prepare", { smiles, largest_fragment: true, neutralize: true, canonical_tautomer: true, generate_3d: true });
     return { status: "succeeded", result, applicability: descriptorApplicability(result), score: prepScore(result), boundary: result.boundary };
@@ -282,6 +332,18 @@ async function execute(job) {
 }
 
 async function complete(job, outcome, error = null) {
+  if (["clinical_phase1_simulation", "clinical_phase2_simulation"].includes(job.job_type)) {
+    const { error: clinicalError } = await supabase.rpc("complete_clinical_simulation_v1", {
+      p_job_id: job.id,
+      p_worker_id: workerId,
+      p_status: outcome?.status || "failed",
+      p_result: outcome?.result || {},
+      p_error: error ? { code: "worker_failure", message: String(error.message || error).slice(0, 500) } : null,
+      p_boundary: outcome?.boundary || "The clinical simulation worker failed before a model projection was produced.",
+    });
+    if (clinicalError) throw clinicalError;
+    return;
+  }
   const { error: rpcError } = await supabase.rpc("complete_campaign_job_v1", {
     p_job_id: job.id,
     p_worker_id: workerId,

@@ -36,6 +36,7 @@ export const api = {
   ingestAssay: (id, input, accessToken) => request(`/api/candidates/${encodeURIComponent(id)}/assays`, { method: "POST", body: JSON.stringify(input), accessToken }),
   registerTranslationInput: (id, input, accessToken) => request(`/api/candidates/${encodeURIComponent(id)}/translation-inputs`, { method: "POST", body: JSON.stringify(input), accessToken }),
   reviewTranslationInput: (id, input, accessToken) => request(`/api/translation-inputs/${encodeURIComponent(id)}/review`, { method: "POST", body: JSON.stringify(input), accessToken }),
+  queueClinicalSimulation: (id, input, accessToken) => request(`/api/candidates/${encodeURIComponent(id)}/simulations`, { method: "POST", body: JSON.stringify(input), accessToken }),
   getValidationPlan: (id, accessToken) => request(`/api/runs/${encodeURIComponent(id)}/validation-plan`, { accessToken }),
   chemistryHealth: () => request("/api/chemistry/health"),
   prepareMolecule: (input, accessToken) => request("/api/chemistry/prepare", { method: "POST", body: JSON.stringify(input), accessToken }),

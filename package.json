@@ -16,7 +16,7 @@
     "build": "vite build",
     "build:sites": "vite build && node scripts/prepare-sites-build.mjs",
     "preview": "vite preview",
-    "test": "node --test tests/evidence-api.test.mjs tests/rag-pipeline.test.mjs tests/auth-flow.test.mjs tests/axiom-embed-contract.test.mjs tests/supabase-schema.test.mjs tests/embedding-client.test.mjs tests/chemistry-contract.test.mjs tests/campaign-contract.test.mjs tests/production-deployment.test.mjs",
+    "test": "node --test tests/evidence-api.test.mjs tests/rag-pipeline.test.mjs tests/auth-flow.test.mjs tests/axiom-embed-contract.test.mjs tests/supabase-schema.test.mjs tests/embedding-client.test.mjs tests/chemistry-contract.test.mjs tests/campaign-contract.test.mjs tests/clinical-simulation.test.mjs tests/production-deployment.test.mjs",
     "test:remote-rag": "node --env-file=.env.local scripts/verify-remote-rag.mjs",
     "test:remote-campaign": "node --env-file=.env.local scripts/verify-remote-campaign.mjs",
     "test:sites": "npm run build:sites && node --test tests/sites-worker.test.mjs",

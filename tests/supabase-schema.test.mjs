@@ -216,6 +216,20 @@ test("clinical translation evidence is durable, tenant-scoped, and review-gated"
   assert.match(sql, /public\.can_write_workspace/i);
 });
 
+test("clinical model runs are tenant-scoped, asynchronously queued, and evidence-gated", async () => {
+  const sql = await readFile(new URL("../supabase/migrations/20260804130000_clinical_simulation_runs.sql", import.meta.url), "utf8");
+  assert.match(sql, /create table public\.clinical_simulation_runs/i);
+  assert.match(sql, /foreign key \(candidate_id, run_id, workspace_id\)/i);
+  assert.match(sql, /alter table public\.clinical_simulation_runs enable row level security/i);
+  assert.match(sql, /queue_clinical_simulation_v1/i);
+  assert.match(sql, /complete_clinical_simulation_v1/i);
+  assert.match(sql, /research_scenario/);
+  assert.match(sql, /evidence_qualified/i);
+  assert.match(sql, /clinical_phase1_simulation/);
+  assert.match(sql, /clinical_phase2_simulation/);
+  assert.match(sql, /auth\.role\(\) <> 'service_role'/i);
+});
+
 test("browser environment example keeps Google sign-in disabled by default", async () => {
   const envExample = await readFile(envExampleUrl, "utf8");
   assert.match(envExample, /^VITE_SUPABASE_GOOGLE_ENABLED=false$/m);

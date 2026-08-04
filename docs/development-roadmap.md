@@ -2,9 +2,11 @@
 
 This roadmap is the authoritative backlog for moving Axiom Observatory from a local proof of concept to a scientifically defensible campaign system. A feature is not `complete` because a binary, endpoint, or model is installed. It is complete only when its inputs, execution, controls, provenance, failure states, validation evidence, and human review are implemented together.
 
-## Implementation checkpoint — 2026-08-03
+## Implementation checkpoint — 2026-08-04
 
-The campaign platform now has an operational Supabase queue, lease heartbeats and retry exhaustion, content-addressed artifact upload, per-job versioned manifests, candidate ranking, human review, and provenance-required assay-result ingestion. Phase I and Phase II views are strict readiness audits; they do not produce simulated clinical results.
+The campaign platform now has an operational Supabase queue, lease heartbeats and retry exhaustion, content-addressed artifact upload, per-job versioned manifests, candidate ranking, human review, and provenance-required assay-result ingestion. The clinical modeling laboratory can execute two explicitly separated modes: an assumption-driven research POC and an evidence-qualified path that remains locked behind scientific prerequisites.
+
+The research POC runs a transparent, seeded two-compartment oral population-PK model using fixed-step RK4. Its Phase II view adds an Emax exposure-response bridge and Monte Carlo parallel-arm operating characteristics. Scenario inputs, model version, seed, hashes, outputs, boundary, and artifact manifest are durable. These are model projections—not patient data, dose recommendations, evidence of safety or efficacy, a validated PBPK platform, or clinical trials.
 
 The open-source execution adapters are implemented for RDKit, ADMET-AI, AutoDock Vina, and AiZynthFinder. Their scientific availability remains input-gated:
 
@@ -12,7 +14,7 @@ The open-source execution adapters are implemented for RDKit, ADMET-AI, AutoDock
 - ADMET applicability is endpoint-specific only when a reviewed `axiom-admet-domain-registry.v1` is configured. Without real reference chemistry and calibration evidence, predictions are marked `not_evaluable` and excluded from ranking.
 - AiZynthFinder runs only with an installed binary plus pinned policy and stock configuration. BRICS remains clearly labelled as fragment analysis, not route planning.
 - Assay results retain source values, qualifiers, QC state, controls, and provenance. Bulk CSV, unit normalization, raw-file artifacts, and prediction-versus-measurement monitoring remain open.
-- PK-Sim/MoBi, nlmixr2/rxode2, and Phase II statistical engines are not installed. Their execution remains blocked behind qualified preclinical and human-data gates.
+- PK-Sim/MoBi and nlmixr2/rxode2 are not installed. The built-in reduced-order model demonstrates asynchronous execution and reproducibility, but it does not satisfy the qualified Phase I/II acceptance criteria below. External engines and predictive execution remain blocked behind qualified preclinical and human-data gates.
 
 This checkpoint advances the software architecture, but it does not satisfy the scientific “done when” criteria below until benchmark datasets, licensed inputs, qualified model registries, and domain review are supplied.
 
@@ -141,4 +143,4 @@ These apply to every milestone:
 6. Phase I model-informed simulation after translational data gates.
 7. Phase II simulation after human Phase I data ingestion.
 
-Artifact foundations begin first and mature alongside every later milestone. Clinical simulation cannot bypass preclinical, assay, or human-data readiness gates.
+Artifact foundations begin first and mature alongside every later milestone. Assumption-driven POC scenarios may execute only when prominently labelled as research projections. Evidence-qualified or predictive clinical simulation cannot bypass preclinical, assay, or human-data readiness gates.

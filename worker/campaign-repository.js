@@ -89,13 +89,14 @@ function createCampaignRepository(env, principal) {
       }, "campaign_list");
       if (!campaigns.length) return [];
       const campaignIds = campaigns.map((item) => item.id).join(",");
-      const [candidates, evaluations, reviews, jobs, assays, translationInputs] = await Promise.all([
+      const [candidates, evaluations, reviews, jobs, assays, translationInputs, simulations] = await Promise.all([
         table("campaign_candidates", { campaign_id: `in.(${campaignIds})`, select: "*", order: "rank_score.desc.nullslast,created_at.asc" }, "candidate_list"),
         table("candidate_evaluations", { run_id: `eq.${runId}`, select: "*", order: "created_at.asc" }, "evaluation_list"),
         table("scientific_reviews", { run_id: `eq.${runId}`, select: "*", order: "created_at.desc" }, "review_list"),
         table("jobs", { run_id: `eq.${runId}`, select: "id,job_type,status,attempts,max_attempts,payload,result,error,created_at,updated_at", order: "created_at.desc" }, "campaign_job_list"),
         table("assay_results", { run_id: `eq.${runId}`, select: "*", order: "created_at.desc" }, "assay_result_list"),
         table("clinical_translation_inputs", { run_id: `eq.${runId}`, select: "*", order: "created_at.desc" }, "translation_input_list"),
+        table("clinical_simulation_runs", { run_id: `eq.${runId}`, select: "*", order: "created_at.desc" }, "clinical_simulation_list"),
       ]);
       return campaigns.map((campaign) => ({
         ...campaign,
@@ -106,6 +107,7 @@ function createCampaignRepository(env, principal) {
           jobs: jobs.filter((job) => job.payload?.candidateId === candidate.id),
           assays: assays.filter((assay) => assay.candidate_id === candidate.id),
           translationInputs: translationInputs.filter((input) => input.candidate_id === candidate.id),
+          simulations: simulations.filter((simulation) => simulation.candidate_id === candidate.id),
           clinicalReadiness: assessClinicalReadiness(
             candidate,
             assays.filter((assay) => assay.candidate_id === candidate.id),
@@ -188,6 +190,14 @@ function createCampaignRepository(env, principal) {
         p_decision: input.decision,
         p_rationale: input.rationale,
       }, "translation_input_review");
+    },
+    queueClinicalSimulation(candidateId, input) {
+      return rpc("queue_clinical_simulation_v1", {
+        p_candidate_id: candidateId,
+        p_phase: input.phase,
+        p_mode: input.mode,
+        p_scenario: input.scenario,
+      }, "clinical_simulation_queue");
     },
   };
 }
