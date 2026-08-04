@@ -41,7 +41,7 @@ test("private chemistry worker authenticates calls and transfers reproducible ar
 });
 
 test("frontend exposes every local chemistry operation", () => {
-  for (const operation of ["prepareMolecule", "predictAdmet", "prepareDocking", "fragmentRetrosynthesis", "listCampaigns", "queueCandidate", "reviewCandidate", "registerTranslationInput", "reviewTranslationInput"]) {
+  for (const operation of ["prepareMolecule", "predictAdmet", "queueValidationAdmet", "prepareDocking", "uploadReceptor", "fragmentRetrosynthesis", "listCampaigns", "queueCandidate", "reviewCandidate", "registerTranslationInput", "reviewTranslationInput"]) {
     assert.match(api, new RegExp(operation));
   }
   assert.match(ui, /Open-source validation workbench/);
@@ -50,4 +50,6 @@ test("frontend exposes every local chemistry operation", () => {
   assert.match(ui, /Real execution, capability-gated/);
   assert.match(ui, /Phase I and Phase II simulation readiness/);
   assert.match(ui, /Run simulation · blocked/);
+  assert.match(ui, /Run ADMET asynchronously/);
+  assert.match(ui, /GitHub Actions dispatched immediately/);
 });

@@ -133,7 +133,13 @@ async function proxyChemistry(request, body) {
       return new Response(JSON.stringify({
         ...local,
         topology: "web_plus_github_actions_batch",
-        batchCompute: { status: "configured", provider: "GitHub Actions", execution: "asynchronous_batched" },
+        batchCompute: {
+          status: "configured",
+          provider: "GitHub Actions",
+          execution: "asynchronous_batched",
+          immediateDispatch: Boolean(process.env.GITHUB_ACTIONS_TOKEN),
+          fallback: process.env.GITHUB_ACTIONS_TOKEN ? null : "hourly_schedule",
+        },
         capabilities: {
           ...local.capabilities,
           admet: { ...local.capabilities?.admet, batchAvailable: true, batchProvider: "GitHub Actions", reason: "ADMET-AI runs asynchronously in queued campaign batches." },

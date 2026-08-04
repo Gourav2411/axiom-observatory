@@ -35,6 +35,7 @@ RUN apt-get update \
 WORKDIR /app
 COPY services/requirements-chemistry-base.txt /tmp/requirements-chemistry-base.txt
 RUN pip install --no-cache-dir -r /tmp/requirements-chemistry-base.txt
+RUN python -c "import scipy; from meeko import MoleculePreparation, PDBQTWriterLegacy; print('Meeko/SciPy chemistry imports ready')"
 COPY --from=web-build /usr/local/bin/node /usr/local/bin/node
 COPY --from=web-build /app /app
 
