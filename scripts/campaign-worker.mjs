@@ -388,8 +388,12 @@ if (configurationError) {
       if (!processed) await wait(pollMs);
     } catch (error) {
       console.error("Campaign worker polling failed:", boundedWorkerError(error));
+      if (oneShot) {
+        process.exitCode = 1;
+        break;
+      }
       await wait(Math.max(pollMs, 5_000));
     }
   }
-  if (oneShot) console.log(`Campaign batch completed after ${processedTotal} job(s).`);
+  if (oneShot && !process.exitCode) console.log(`Campaign batch completed after ${processedTotal} job(s).`);
 }
