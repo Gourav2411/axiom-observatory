@@ -23,6 +23,10 @@ test("local campaign worker executes the complete queued workflow without placeh
   assert.match(runner, /authenticated_private_http/);
   assert.match(runner, /AXIOM_CAMPAIGN_JOB_TYPES/);
   assert.match(runner, /AXIOM_CAMPAIGN_ONESHOT/);
+  assert.match(runner, /settings\.receptorObject/);
+  assert.match(runner, /durableReceptorPdbqt/);
+  assert.match(runner, /SHA-256 verification failed/);
+  assert.match(runner, /chemistry\("\/receptors"/);
   assert.match(runner, /No docking engine executed; no poses, affinities, redocking control, or binding claims exist/i);
   assert.match(runner, /No AiZynthFinder policy search executed/i);
   assert.match(runner, /excluded from ranking until a calibrated endpoint-specific domain registry/i);
@@ -38,11 +42,11 @@ test("campaign worker accepts project origins and rejects Supabase dashboard URL
 });
 
 test("campaign API requires an authenticated principal and delegates writes to scoped RPCs", () => {
-  for (const path of ["campaigns", "candidates", "queue", "reviews", "assays", "translation-inputs"]) assert.match(server, new RegExp(path));
+  for (const path of ["campaigns", "candidates", "queue", "validationAdmetQueueMatch", "reviews", "assays", "translation-inputs"]) assert.match(server, new RegExp(path));
   assert.match(server, /authenticateSupabaseRequest/);
   assert.match(server, /chemistry-compute\.yml\/dispatches/);
   assert.match(server, /scheduled_fallback/);
-  for (const rpc of ["create_campaign_v1", "add_campaign_candidate_v1", "queue_candidate_workflow_v1", "submit_scientific_review_v1", "ingest_assay_result_v1", "register_clinical_translation_input_v1", "review_clinical_translation_input_v1"]) {
+  for (const rpc of ["create_campaign_v1", "add_campaign_candidate_v1", "queue_candidate_workflow_v1", "queue_validation_admet_v1", "submit_scientific_review_v1", "ingest_assay_result_v1", "register_clinical_translation_input_v1", "review_clinical_translation_input_v1"]) {
     assert.match(repository, new RegExp(rpc));
   }
   assert.doesNotMatch(repository, /authorization: `Bearer \$\{serviceRoleKey\}`/);

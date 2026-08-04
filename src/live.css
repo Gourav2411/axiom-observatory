@@ -346,6 +346,13 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid 
 .live-docking-state span { display: grid; gap: 3px; }
 .live-docking-state strong { font-size: 10px; }
 .live-docking-state small { font-size: 8px; }
+.live-async-status { display: flex; align-items: center; gap: 9px; margin-top: 12px; border: 1px solid #28546b; border-radius: 6px; background: #071c2a; color: #79d5ff; padding: 10px; }
+.live-async-status svg { flex: 0 0 auto; font-size: 18px; }
+.live-async-status span { display: grid; gap: 3px; }
+.live-async-status strong { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+.live-async-status small { color: var(--live-muted); font-size: 8px; line-height: 1.45; }
+.live-async-status.is-available, .live-async-status.is-completed { border-color: #245c55; color: var(--live-teal); background: #092923; }
+.live-async-status.is-unavailable { border-color: #6e3f37; color: #ff9b82; background: #28120f; }
 .live-config-list { display: grid; gap: 0; margin: 11px 0 0; border: 1px solid #263e50; border-radius: 6px; overflow: hidden; }
 .live-config-list > div { display: grid; grid-template-columns: 110px minmax(0,1fr); border-bottom: 1px solid #263e50; }
 .live-config-list > div:last-child { border-bottom: 0; }

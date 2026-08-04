@@ -186,6 +186,25 @@ test("campaign worker controls and assay ingestion fail closed with tenant bound
   assert.match(assays, /grant execute on function public\.ingest_assay_result_v1\(uuid,jsonb\) to authenticated/i);
 });
 
+test("validation workbench can queue an authenticated ADMET-only job", async () => {
+  const sql = await readFile(new URL("../supabase/migrations/20260804113000_validation_admet_queue.sql", import.meta.url), "utf8");
+  assert.match(sql, /create or replace function public\.queue_validation_admet_v1/i);
+  assert.match(sql, /auth\.uid\(\)/i);
+  assert.match(sql, /public\.can_write_workspace\(r\.workspace_id\)/i);
+  assert.match(sql, /'validation-admet:' \|\| v_candidate\.id::text/i);
+  assert.match(sql, /'admet'/i);
+  assert.match(sql, /attempts = case[\s\S]*else 0/i);
+  assert.match(sql, /grant execute[\s\S]*to authenticated/i);
+});
+
+test("prepared docking receptors receive a tenant-scoped durable upload grant", async () => {
+  const sql = await readFile(new URL("../supabase/migrations/20260804114500_durable_receptor_input.sql", import.meta.url), "utf8");
+  assert.match(sql, /create or replace function public\.prepare_receptor_upload_v1/i);
+  assert.match(sql, /public\.can_write_workspace\(r\.workspace_id\)/i);
+  assert.match(sql, /workspaceId/i);
+  assert.match(sql, /grant execute[\s\S]*to authenticated/i);
+});
+
 test("clinical translation evidence is durable, tenant-scoped, and review-gated", async () => {
   const sql = await readFile(new URL("../supabase/migrations/20260803140000_clinical_translation_inputs.sql", import.meta.url), "utf8");
   assert.match(sql, /create table public\.clinical_translation_inputs/i);

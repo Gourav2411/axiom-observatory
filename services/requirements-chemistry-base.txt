@@ -3,3 +3,4 @@ uvicorn==0.52.1
 rdkit==2025.9.5
 meeko==0.7.1
 gemmi==0.7.5
+scipy==1.15.3

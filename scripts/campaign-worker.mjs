@@ -163,6 +163,15 @@ async function chemistry(path, body) {
   return payload;
 }
 
+async function durableReceptorPdbqt(reference) {
+  if (!reference?.bucketId || !reference?.objectPath || !reference?.sha256) throw new Error("Durable receptor reference is incomplete");
+  const { data, error } = await supabase.storage.from(reference.bucketId).download(reference.objectPath);
+  if (error || !data) throw new Error(`Durable receptor download failed: ${error?.message || "empty object"}`);
+  const bytes = Buffer.from(await data.arrayBuffer());
+  if (sha256(bytes) !== reference.sha256) throw new Error("Durable receptor SHA-256 verification failed");
+  return bytes.toString("utf8");
+}
+
 function descriptorApplicability(prepared) {
   const d = prepared.descriptors || {};
   const checks = [
@@ -240,9 +249,14 @@ async function execute(job) {
     return { status: "succeeded", result, applicability: { status: "inputs_prepared", method: "deterministic ligand and grid preparation" }, score: { eligible: false, points: 0, maxPoints: 0, method: "preparation does not rank candidates" }, boundary: result.boundary };
   }
   if (job.job_type === "docking_score") {
-    if (!settings.receptorPath || !settings.receptorId || !settings.center || !settings.size) return blockedResult(job, "Actual docking needs a prepared receptor PDBQT path and explicit pocket box.", "receptorPath, receptorId, center and size");
+    if ((!settings.receptorPath && !settings.receptorObject) || !settings.receptorId || !settings.center || !settings.size) return blockedResult(job, "Actual docking needs a durable prepared receptor PDBQT input and explicit pocket box.", "receptorPath or receptorObject, receptorId, center and size");
     try {
-      const result = await chemistry("/docking/run", { smiles, receptor_id: settings.receptorId, receptor_path: settings.receptorPath, center: settings.center, size: settings.size, exhaustiveness: settings.exhaustiveness || 8, seed: settings.seed || 20260803, replicates: settings.dockingReplicates || 3, control_smiles: settings.controlSmiles || null });
+      let receptorPath = settings.receptorPath;
+      if (settings.receptorObject) {
+        const registered = await chemistry("/receptors", { receptor_id: settings.receptorId, pdbqt: await durableReceptorPdbqt(settings.receptorObject) });
+        receptorPath = registered.receptorPath;
+      }
+      const result = await chemistry("/docking/run", { smiles, receptor_id: settings.receptorId, receptor_path: receptorPath, center: settings.center, size: settings.size, exhaustiveness: settings.exhaustiveness || 8, seed: settings.seed || 20260803, replicates: settings.dockingReplicates || 3, control_smiles: settings.controlSmiles || null });
       const affinity = Number(result.bestAffinity);
       const controlPassed = result.control?.status === "score_control_completed" && result.control?.stability?.status === "pass" && result.stability?.status === "pass";
       return { status: "succeeded", result, applicability: { ...result.control, candidateStability: result.stability, status: controlPassed ? "same_box_control_passed" : result.control?.status === "not_supplied" ? "control_not_supplied" : "control_policy_failed", limitation: "Same-box score controls and replicate stability do not establish crystallographic redocking validity or binding." }, score: { eligible: controlPassed && Number.isFinite(affinity), points: controlPassed && Number.isFinite(affinity) ? Math.max(0, Math.min(15, -affinity * 1.5)) : 0, maxPoints: 15, method: controlPassed ? "bounded Vina affinity prioritization signal after replicate/control policy" : "excluded: required docking control and replicate-stability policy did not pass" }, boundary: result.boundary };

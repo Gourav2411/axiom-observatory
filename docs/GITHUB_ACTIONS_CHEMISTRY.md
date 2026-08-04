@@ -23,6 +23,8 @@ The service-role key is used only by the private workflow to lease and complete 
 
 Create a fine-grained GitHub token restricted to `Gourav2411/axiom-observatory` with **Actions: Read and write**. Store it in Render as `GITHUB_ACTIONS_TOKEN`. The Blueprint provides `GITHUB_ACTIONS_REPOSITORY` and `GITHUB_ACTIONS_REF`.
 
+This credential is required for the Validation workbench's **Run ADMET asynchronously** button to dispatch immediately. Without it, the durable Supabase job remains safe and the hourly workflow schedule will pick it up, but the UI will truthfully report `scheduled_fallback` instead of claiming an immediate run.
+
 If this token is absent or dispatch fails, the job stays queued and the hourly workflow schedule processes it later. The API reports `scheduled_fallback` rather than losing the job.
 
 ## Database migration

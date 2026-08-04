@@ -9,6 +9,7 @@ const computeDockerfile = await readFile(new URL("../deploy/Dockerfile.compute",
 const chemistryWorkflow = await readFile(new URL("../.github/workflows/chemistry-compute.yml", import.meta.url), "utf8");
 const blueprint = await readFile(new URL("../render.yaml", import.meta.url), "utf8");
 const chemistryWorker = await readFile(new URL("../services/chemistry_worker.py", import.meta.url), "utf8");
+const baseRequirements = await readFile(new URL("../services/requirements-chemistry-base.txt", import.meta.url), "utf8");
 
 test("production server serves the SPA and protects computational chemistry", () => {
   assert.match(server, /dist\/client/);
@@ -33,6 +34,8 @@ test("production web container keeps lightweight auditable processes", () => {
   assert.match(blueprint, /AXIOM_ADMET_EXECUTION_ENABLED[\s\S]*value: "false"/);
   assert.match(dockerfile, /libxext6/);
   assert.match(dockerfile, /libsm6/);
+  assert.match(baseRequirements, /scipy==1\.15\.3/);
+  assert.match(dockerfile, /from meeko import MoleculePreparation, PDBQTWriterLegacy/);
   assert.match(dockerfile, /start-production\.mjs/);
 });
 
@@ -48,6 +51,7 @@ test("GitHub Actions batches heavy chemistry without a paid Render service", () 
   assert.doesNotMatch(blueprint, /type: pserv/);
   assert.match(blueprint, /AXIOM_HEAVY_COMPUTE_MODE[\s\S]*github_actions/);
   assert.match(server, /web_plus_github_actions_batch/);
+  assert.match(server, /immediateDispatch/);
 });
 
 test("Render blueprint declares the Yomexa domain without embedding secrets", () => {

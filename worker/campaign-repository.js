@@ -64,6 +64,22 @@ function createCampaignRepository(env, principal) {
     }, operation);
   }
 
+  async function uploadStorageObject(bucketId, objectPath, body, contentType, operation) {
+    const encodedPath = objectPath.split("/").map(encodeURIComponent).join("/");
+    const response = await transport(endpoint(supabaseUrl, `/storage/v1/object/${encodeURIComponent(bucketId)}/${encodedPath}`), {
+      method: "POST",
+      headers: {
+        apikey: serviceRoleKey,
+        authorization: `Bearer ${principal.accessToken}`,
+        "content-type": contentType,
+        "x-upsert": "true",
+      },
+      body,
+      signal: AbortSignal.timeout(CAMPAIGN_TIMEOUT_MS),
+    });
+    if (!response.ok) throw new PersistenceError("Campaign storage rejected the receptor upload", { operation, status: response.status });
+  }
+
   return {
     async list(runId) {
       const campaigns = await table("campaigns", {
@@ -120,6 +136,31 @@ function createCampaignRepository(env, principal) {
     },
     queueCandidate(candidateId) {
       return rpc("queue_candidate_workflow_v1", { p_candidate_id: candidateId }, "candidate_queue");
+    },
+    queueValidationAdmet(runId, input) {
+      return rpc("queue_validation_admet_v1", {
+        p_run_id: runId,
+        p_smiles: input.smiles,
+        p_name: input.name ?? "Validation workbench candidate",
+      }, "validation_admet_queue");
+    },
+    async uploadReceptor(runId, input) {
+      const grant = await rpc("prepare_receptor_upload_v1", {
+        p_run_id: runId,
+        p_receptor_id: input.receptorId,
+      }, "receptor_upload_prepare");
+      const objectPath = `${grant.workspaceId}/${grant.runId}/receptors/${grant.receptorId}-${input.sha256.slice(0, 16)}.pdbqt`;
+      await uploadStorageObject("structures", objectPath, input.pdbqt, "chemical/x-pdbqt", "receptor_upload");
+      return {
+        schemaVersion: "axiom-durable-receptor.v1",
+        status: "stored",
+        receptorId: grant.receptorId,
+        bucketId: "structures",
+        objectPath,
+        sha256: input.sha256,
+        byteSize: input.byteSize,
+        boundary: "The prepared receptor input is durably stored. Protonation, missing residues, cofactors, waters, and pocket suitability still require scientific review.",
+      };
     },
     reviewCandidate(candidateId, input) {
       return rpc("submit_scientific_review_v1", {

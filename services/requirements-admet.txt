@@ -3,3 +3,4 @@ fastapi==0.141.1
 uvicorn==0.52.1
 meeko==0.7.1
 gemmi==0.7.5
+scipy==1.15.3

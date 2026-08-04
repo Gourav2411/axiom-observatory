@@ -129,6 +129,11 @@ function apiError(code, message, status = 500, details) {
   return json({ error: { code, message, ...(details ? { details } : {}) } }, status);
 }
 
+async function sha256Text(value) {
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 function handledInfrastructureError(error) {
   if (error instanceof AuthenticationError) {
     return apiError(error.code, error.message, 401);
@@ -937,6 +942,11 @@ async function handleApi(request, env = {}) {
       if (!input || typeof input.name !== "string" || input.name.trim().length < 1 || input.name.trim().length > 160) {
         return apiError("invalid_input", "Campaign name must contain between 1 and 160 characters", 400);
       }
+      if (input.settings?.receptorObject !== undefined && (!input.settings.receptorObject || typeof input.settings.receptorObject !== "object"
+        || input.settings.receptorObject.bucketId !== "structures" || typeof input.settings.receptorObject.objectPath !== "string"
+        || !/^[0-9a-f]{64}$/.test(input.settings.receptorObject.sha256 ?? ""))) {
+        return apiError("invalid_receptor", "The durable receptor reference is invalid", 400);
+      }
       return json(await campaigns.create(runCampaignsMatch[1], input), 201);
     } catch (error) {
       const handled = handledInfrastructureError(error);
@@ -962,6 +972,32 @@ async function handleApi(request, env = {}) {
     }
   }
 
+  const receptorUploadMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/receptors$/);
+  if (receptorUploadMatch && request.method === "POST") {
+    let input;
+    try { input = await request.json(); } catch { return apiError("invalid_json", "Request body must be valid JSON", 400); }
+    const receptorId = typeof input?.receptor_id === "string" ? input.receptor_id.trim() : "";
+    const pdbqt = typeof input?.pdbqt === "string" ? input.pdbqt.replace(/\r\n/g, "\n").trim() + "\n" : "";
+    const upper = pdbqt.toUpperCase();
+    if (!/^[A-Za-z0-9_.-]{1,80}$/.test(receptorId) || pdbqt.length < 20 || pdbqt.length > 25_000_000
+      || (!upper.includes("ATOM  ") && !upper.includes("HETATM")) || upper.includes("ROOT")) {
+      return apiError("invalid_receptor", "Expected a prepared rigid receptor PDBQT with a safe identifier and ATOM or HETATM records", 400);
+    }
+    try {
+      const principal = await authenticateSupabaseRequest(request, env);
+      return json(await createCampaignRepository(env, principal).uploadReceptor(receptorUploadMatch[1], {
+        receptorId,
+        pdbqt,
+        sha256: await sha256Text(pdbqt),
+        byteSize: new TextEncoder().encode(pdbqt).byteLength,
+      }), 201);
+    } catch (error) {
+      const handled = handledInfrastructureError(error);
+      if (handled) return handled;
+      throw error;
+    }
+  }
+
   const candidateQueueMatch = url.pathname.match(/^\/api\/candidates\/([^/]+)\/queue$/);
   if (candidateQueueMatch && request.method === "POST") {
     try {
@@ -970,6 +1006,29 @@ async function handleApi(request, env = {}) {
       const heavyQueued = jobs.some((job) => ["admet", "docking_score"].includes(job.job_type));
       const compute = heavyQueued ? await dispatchGithubChemistry(env, env.UPSTREAM_FETCH ?? globalThis.fetch) : { status: "not_required" };
       return json({ jobs, compute }, 202);
+    } catch (error) {
+      const handled = handledInfrastructureError(error);
+      if (handled) return handled;
+      throw error;
+    }
+  }
+
+  const validationAdmetQueueMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/validation\/admet$/);
+  if (validationAdmetQueueMatch && request.method === "POST") {
+    let input;
+    try { input = await request.json(); } catch { return apiError("invalid_json", "Request body must be valid JSON", 400); }
+    if (!input || typeof input.smiles !== "string" || !input.smiles.trim() || input.smiles.trim().length > 10_000
+      || (input.name !== undefined && (typeof input.name !== "string" || !input.name.trim() || input.name.trim().length > 160))) {
+      return apiError("invalid_input", "A valid SMILES structure and optional candidate name are required", 400);
+    }
+    try {
+      const principal = await authenticateSupabaseRequest(request, env);
+      const queued = await createCampaignRepository(env, principal).queueValidationAdmet(validationAdmetQueueMatch[1], {
+        smiles: input.smiles.trim(),
+        name: input.name?.trim(),
+      });
+      const compute = await dispatchGithubChemistry(env, env.UPSTREAM_FETCH ?? globalThis.fetch);
+      return json({ ...queued, compute }, 202);
     } catch (error) {
       const handled = handledInfrastructureError(error);
       if (handled) return handled;
