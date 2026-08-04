@@ -14,6 +14,7 @@ import {
   sendPasswordReset, updatePassword, validateNewPassword,
 } from "./auth-flow.js";
 import { supabase, supabaseBrowserConfigured, supabaseGoogleConfigured } from "./supabase.js";
+import { persistentAdmetState } from "./persistent-validation.js";
 
 const SAVED_RUN_KEY = "axiom:last-evidence-run";
 const RUN_TABS = ["Research", "Campaign", "Translation", "Index", "Validation", "Evidence", "Literature", "Provenance", "Capabilities"];
@@ -530,6 +531,7 @@ function ValidationPlan({run, accessToken}) {
   const [smiles,setSmiles]=useState(run.molecule?.canonicalSmiles ?? "CC(=O)Oc1ccccc1C(=O)O");
   const [policy,setPolicy]=useState({largest_fragment:true,neutralize:true,canonical_tautomer:true,generate_3d:true});
   const [prepared,setPrepared]=useState(null); const [admet,setAdmet]=useState(null); const [admetQueue,setAdmetQueue]=useState(null); const [docking,setDocking]=useState(null); const [retro,setRetro]=useState(null);
+  const admetRequestedRef=useRef(false);
   const [dockInput,setDockInput]=useState({receptor_id:run.target?.structure?.pdbId??"",receptor_path:"",center:{x:0,y:0,z:0},size:{x:22,y:22,z:22},exhaustiveness:8,seed:20260803,replicates:3,control_smiles:""});
   const [receptor,setReceptor]=useState(null);
   const loadPlan=async()=>{
@@ -542,10 +544,22 @@ function ValidationPlan({run, accessToken}) {
     finally{setLoading(false);}
   };
   useEffect(()=>{loadPlan();},[run.id]);
+  useEffect(()=>{
+    let active=true;
+    api.listCampaigns(run.id,accessToken).then(value=>{
+      if(!active||admetRequestedRef.current)return;
+      const restored=persistentAdmetState(value.items);
+      if(!restored)return;
+      setAdmetQueue(restored.queue);setAdmet(restored.result);
+      if(restored.smiles)setSmiles(restored.smiles);
+      setTool("ADMET & toxicity");
+    }).catch(restoreError=>{if(active)setError(`Asynchronous job state could not be restored: ${restoreError.message}`);});
+    return()=>{active=false;};
+  },[run.id,accessToken]);
   const execute=async(name,action)=>{setRunning(name);setError("");try{return await action();}catch(e){setError(e.message);return null;}finally{setRunning("");}};
   const prepare=async()=>{const value=await execute("prepare",()=>api.prepareMolecule({smiles,...policy},accessToken));if(value){setPrepared(value);setSmiles(value.canonicalSmiles);setAdmet(null);setDocking(null);setRetro(null);}};
   const predict=async()=>{const value=await execute("admet",()=>api.predictAdmet(prepared?.canonicalSmiles??smiles,accessToken));if(value)setAdmet(value);};
-  const queueAdmet=async()=>{const value=await execute("admet-queue",()=>api.queueValidationAdmet(run.id,{smiles:prepared?.canonicalSmiles??smiles,name:`${run.target?.label??"Target"} validation candidate`},accessToken));if(value){setAdmet(null);setAdmetQueue({candidateId:value.candidateId,jobId:value.job?.id,status:value.job?.status??"queued",compute:value.compute});}};
+  const queueAdmet=async()=>{admetRequestedRef.current=true;const value=await execute("admet-queue",()=>api.queueValidationAdmet(run.id,{smiles:prepared?.canonicalSmiles??smiles,name:`${run.target?.label??"Target"} validation candidate`},accessToken));if(value){setAdmet(null);setAdmetQueue({candidateId:value.candidateId,jobId:value.job?.id,status:value.job?.status??"queued",compute:value.compute});}else admetRequestedRef.current=false;};
   const prepareDocking=async()=>{const value=await execute("docking",()=>api.prepareDocking({...dockInput,smiles:prepared?.canonicalSmiles??smiles},accessToken));if(value)setDocking(value);};
   const uploadReceptor=async(event)=>{const file=event.target.files?.[0];if(!file)return;const value=await execute("receptor",async()=>api.registerReceptor({receptor_id:dockInput.receptor_id||file.name.replace(/\.pdbqt$/i,""),pdbqt:await file.text()},accessToken));if(value){setReceptor(value);setDockInput(current=>({...current,receptor_id:value.receptorId,receptor_path:value.receptorPath}));}};
   const runDocking=async()=>{const value=await execute("docking-run",()=>api.runDocking({...dockInput,smiles:prepared?.canonicalSmiles??smiles},accessToken));if(value)setDocking(value);};
@@ -556,17 +570,16 @@ function ValidationPlan({run, accessToken}) {
     const refresh=async()=>{
       try{
         const value=await api.listCampaigns(run.id,accessToken);
-        const candidate=(value.items??[]).flatMap(item=>item.candidates??[]).find(item=>item.id===admetQueue.candidateId);
-        if(!active||!candidate)return;
-        const job=(candidate.jobs??[]).find(item=>item.id===admetQueue.jobId)||(candidate.jobs??[]).find(item=>item.job_type==="admet");
-        const evaluation=(candidate.evaluations??[]).find(item=>item.evaluation_type==="admet");
-        if(evaluation?.status==="completed"&&evaluation.result){setAdmet(evaluation.result);setAdmetQueue(current=>({...current,status:"succeeded"}));return;}
-        const status=job?.status??admetQueue.status;
-        setAdmetQueue(current=>({...current,status,error:job?.error?.message??null}));
-        if(["failed","blocked","cancelled"].includes(status))setError(job?.error?.message??`ADMET job ${status}. Requeue it to try again.`);
+        const restored=persistentAdmetState(value.items,admetQueue.candidateId);
+        if(!active||!restored)return;
+        setAdmetQueue(restored.queue);
+        if(restored.result)setAdmet(restored.result);
+        if(["failed","blocked","cancelled"].includes(restored.queue.status))setError(restored.queue.error??`ADMET job ${restored.queue.status}. Requeue it to try again.`);
       }catch(pollError){if(active)setAdmetQueue(current=>({...current,pollError:pollError.message}));}
     };
-    refresh();const timer=setInterval(refresh,3000);return()=>{active=false;clearInterval(timer);};
+    const resume=()=>{if(document.visibilityState==="visible")refresh();};
+    refresh();const timer=setInterval(refresh,3000);document.addEventListener("visibilitychange",resume);
+    return()=>{active=false;clearInterval(timer);document.removeEventListener("visibilitychange",resume);};
   },[admetQueue?.candidateId,admetQueue?.jobId,admetQueue?.status,run.id,accessToken]);
   const workers=Array.isArray(plan?.workers)?plan.workers:[];
   const capabilities=chemistry?.capabilities??{};
