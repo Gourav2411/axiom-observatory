@@ -235,6 +235,13 @@ test("clinical model runs are tenant-scoped, asynchronously queued, and evidence
   assert.match(sql, /auth\.role\(\) <> 'service_role'/i);
 });
 
+test("scoped campaign leasing accepts clinical model jobs", async () => {
+  const sql = await readFile(new URL("../supabase/migrations/20260804141000_lease_clinical_simulation_jobs.sql", import.meta.url), "utf8");
+  assert.match(sql, /create or replace function public\.lease_campaign_jobs_v2/i);
+  assert.match(sql, /'clinical_phase1_simulation'/i);
+  assert.match(sql, /'clinical_phase2_simulation'/i);
+});
+
 test("browser environment example keeps Google sign-in disabled by default", async () => {
   const envExample = await readFile(envExampleUrl, "utf8");
   assert.match(envExample, /^VITE_SUPABASE_GOOGLE_ENABLED=false$/m);

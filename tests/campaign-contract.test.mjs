@@ -61,6 +61,10 @@ test("clinical research scenarios execute asynchronously without entering discov
   assert.match(runner, /Clinical model projections are excluded from discovery ranking/);
 });
 
+test("one-shot campaign workers fail fast when durable leasing fails", () => {
+  assert.match(runner, /if \(oneShot\) \{\s*process\.exitCode = 1;\s*break;/);
+});
+
 test("clinical translation is a strict readiness audit, never a synthetic trial result", () => {
   assert.match(readiness, /blocked_missing_qualified_inputs/);
   assert.match(readiness, /ready_for_pbpk_model_configuration/);
