@@ -148,6 +148,11 @@ test("Supabase accepts the local validation stage status emitted by the frontend
   assert.match(sql, /alter type public\.stage_status add value if not exists 'available_local'/i);
 });
 
+test("Supabase accepts the asynchronous validation stage status emitted in GitHub Actions mode", async () => {
+  const sql = await readFile(new URL("../supabase/migrations/20260804133000_add_available_async_stage_status.sql", import.meta.url), "utf8");
+  assert.match(sql, /alter type public\.stage_status add value if not exists 'available_async'/i);
+});
+
 test("campaign schema provides a tenant-safe durable chemistry queue and human review", async () => {
   const sql = await readFile(new URL("../supabase/migrations/20260803014500_campaign_system.sql", import.meta.url), "utf8");
   for (const table of ["campaigns", "campaign_candidates", "candidate_evaluations", "scientific_reviews"]) {
