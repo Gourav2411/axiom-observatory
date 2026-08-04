@@ -7,6 +7,7 @@ const launcher = await readFile(new URL("../scripts/start-production.mjs", impor
 const dockerfile = await readFile(new URL("../deploy/Dockerfile", import.meta.url), "utf8");
 const computeDockerfile = await readFile(new URL("../deploy/Dockerfile.compute", import.meta.url), "utf8");
 const chemistryWorkflow = await readFile(new URL("../.github/workflows/chemistry-compute.yml", import.meta.url), "utf8");
+const clinicalWorkflow = await readFile(new URL("../.github/workflows/clinical-simulation.yml", import.meta.url), "utf8");
 const blueprint = await readFile(new URL("../render.yaml", import.meta.url), "utf8");
 const chemistryWorker = await readFile(new URL("../services/chemistry_worker.py", import.meta.url), "utf8");
 const baseRequirements = await readFile(new URL("../services/requirements-chemistry-base.txt", import.meta.url), "utf8");
@@ -52,6 +53,13 @@ test("GitHub Actions batches heavy chemistry without a paid Render service", () 
   assert.match(blueprint, /AXIOM_HEAVY_COMPUTE_MODE[\s\S]*github_actions/);
   assert.match(server, /web_plus_github_actions_batch/);
   assert.match(server, /immediateDispatch/);
+});
+
+test("GitHub Actions executes clinical model jobs on the free asynchronous compute plane", () => {
+  assert.match(clinicalWorkflow, /workflow_dispatch:/);
+  assert.match(clinicalWorkflow, /clinical_phase1_simulation,clinical_phase2_simulation/);
+  assert.match(clinicalWorkflow, /services\/clinical_simulation\.py/);
+  assert.match(clinicalWorkflow, /SUPABASE_SERVICE_ROLE_KEY: \$\{\{ secrets\.SUPABASE_SERVICE_ROLE_KEY \}\}/);
 });
 
 test("Render blueprint declares the Yomexa domain without embedding secrets", () => {

@@ -42,14 +42,23 @@ test("campaign worker accepts project origins and rejects Supabase dashboard URL
 });
 
 test("campaign API requires an authenticated principal and delegates writes to scoped RPCs", () => {
-  for (const path of ["campaigns", "candidates", "queue", "validationAdmetQueueMatch", "reviews", "assays", "translation-inputs"]) assert.match(server, new RegExp(path));
+  for (const path of ["campaigns", "candidates", "queue", "validationAdmetQueueMatch", "reviews", "assays", "translation-inputs", "simulations"]) assert.match(server, new RegExp(path));
   assert.match(server, /authenticateSupabaseRequest/);
-  assert.match(server, /chemistry-compute\.yml\/dispatches/);
+  assert.match(server, /chemistry-compute\.yml/);
+  assert.match(server, /clinical-simulation\.yml/);
   assert.match(server, /scheduled_fallback/);
-  for (const rpc of ["create_campaign_v1", "add_campaign_candidate_v1", "queue_candidate_workflow_v1", "queue_validation_admet_v1", "submit_scientific_review_v1", "ingest_assay_result_v1", "register_clinical_translation_input_v1", "review_clinical_translation_input_v1"]) {
+  for (const rpc of ["create_campaign_v1", "add_campaign_candidate_v1", "queue_candidate_workflow_v1", "queue_validation_admet_v1", "submit_scientific_review_v1", "ingest_assay_result_v1", "register_clinical_translation_input_v1", "review_clinical_translation_input_v1", "queue_clinical_simulation_v1"]) {
     assert.match(repository, new RegExp(rpc));
   }
   assert.doesNotMatch(repository, /authorization: `Bearer \$\{serviceRoleKey\}`/);
+});
+
+test("clinical research scenarios execute asynchronously without entering discovery ranking", () => {
+  assert.match(runner, /clinical_phase1_simulation/);
+  assert.match(runner, /clinical_phase2_simulation/);
+  assert.match(runner, /services\/clinical_simulation\.py/);
+  assert.match(runner, /complete_clinical_simulation_v1/);
+  assert.match(runner, /Clinical model projections are excluded from discovery ranking/);
 });
 
 test("clinical translation is a strict readiness audit, never a synthetic trial result", () => {

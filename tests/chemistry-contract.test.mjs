@@ -41,15 +41,17 @@ test("private chemistry worker authenticates calls and transfers reproducible ar
 });
 
 test("frontend exposes every local chemistry operation", () => {
-  for (const operation of ["prepareMolecule", "predictAdmet", "queueValidationAdmet", "prepareDocking", "uploadReceptor", "fragmentRetrosynthesis", "listCampaigns", "queueCandidate", "reviewCandidate", "registerTranslationInput", "reviewTranslationInput"]) {
+  for (const operation of ["prepareMolecule", "predictAdmet", "queueValidationAdmet", "prepareDocking", "uploadReceptor", "fragmentRetrosynthesis", "listCampaigns", "queueCandidate", "reviewCandidate", "registerTranslationInput", "reviewTranslationInput", "queueClinicalSimulation"]) {
     assert.match(api, new RegExp(operation));
   }
   assert.match(ui, /Open-source validation workbench/);
   assert.match(ui, /COMPUTATIONAL PREDICTION/);
   assert.match(ui, /Asynchronous discovery campaign/);
   assert.match(ui, /Real execution, capability-gated/);
-  assert.match(ui, /Phase I and Phase II simulation readiness/);
-  assert.match(ui, /Run simulation · blocked/);
+  assert.match(ui, /Clinical modeling laboratory/);
+  assert.match(ui, /Research POC/);
+  assert.match(ui, /Axiom Open PK\/PD/);
+  assert.match(ui, /MODEL PROJECTION/);
   assert.match(ui, /Run ADMET asynchronously/);
   assert.match(ui, /GitHub Actions dispatched immediately/);
 });

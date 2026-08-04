@@ -23,11 +23,11 @@ class AuthenticationError extends Error {
   }
 }
 
-async function dispatchGithubChemistry(env, transport = globalThis.fetch) {
+async function dispatchGithubWorkflow(env, workflow, transport = globalThis.fetch) {
   const token = env.GITHUB_ACTIONS_TOKEN?.trim();
   const repository = env.GITHUB_ACTIONS_REPOSITORY?.trim();
   if (!token || !repository) return { status: "scheduled_fallback", reason: "GitHub Actions dispatch credentials are not configured." };
-  const response = await transport(`https://api.github.com/repos/${repository}/actions/workflows/chemistry-compute.yml/dispatches`, {
+  const response = await transport(`https://api.github.com/repos/${repository}/actions/workflows/${workflow}/dispatches`, {
     method: "POST",
     headers: {
       accept: "application/vnd.github+json",
@@ -40,7 +40,29 @@ async function dispatchGithubChemistry(env, transport = globalThis.fetch) {
     signal: AbortSignal.timeout(12_000),
   });
   if (!response.ok) return { status: "scheduled_fallback", reason: `Immediate GitHub Actions dispatch returned HTTP ${response.status}.` };
-  return { status: "dispatched", workflow: "chemistry-compute.yml" };
+  return { status: "dispatched", workflow };
+}
+
+const dispatchGithubChemistry = (env, transport = globalThis.fetch) => dispatchGithubWorkflow(env, "chemistry-compute.yml", transport);
+const dispatchGithubClinical = (env, transport = globalThis.fetch) => dispatchGithubWorkflow(env, "clinical-simulation.yml", transport);
+
+function validateClinicalScenario(input) {
+  if (!input || !["phase1", "phase2"].includes(input.phase) || !["research_scenario", "evidence_qualified"].includes(input.mode)) {
+    return "A valid phase and execution mode are required";
+  }
+  if (!input.scenario || typeof input.scenario !== "object" || Array.isArray(input.scenario)) return "A structured simulation scenario is required";
+  const serialized = JSON.stringify(input.scenario);
+  if (serialized.length > 30_000) return "The simulation scenario exceeds the 30 KB limit";
+  const pk = input.scenario.pk;
+  if (!pk || typeof pk !== "object" || Array.isArray(pk)) return "A PK parameter set is required";
+  const pkNumbers = ["doseMg", "doseCount", "doseIntervalHours", "durationHours", "bioavailability", "absorptionRatePerHour", "clearanceLPerHour", "centralVolumeL", "peripheralVolumeL", "intercompartmentalClearanceLPerHour", "betweenSubjectCv", "residualCv", "cohortSize"];
+  if (pkNumbers.some((key) => typeof pk[key] !== "number" || !Number.isFinite(pk[key]))) return "Every PK parameter must be a finite number";
+  if (input.phase === "phase2") {
+    const pd = input.scenario.pd;
+    const pdNumbers = ["emax", "ec50NgPerMl", "placeboChange", "endpointSd", "treatmentN", "controlN", "dropoutRate", "trialReplicates"];
+    if (!pd || typeof pd !== "object" || pdNumbers.some((key) => typeof pd[key] !== "number" || !Number.isFinite(pd[key]))) return "Every Phase II PD and design parameter must be a finite number";
+  }
+  return null;
 }
 
 const SEARCH_QUERY = `
@@ -1104,6 +1126,24 @@ async function handleApi(request, env = {}) {
     try {
       const principal = await authenticateSupabaseRequest(request, env);
       return json(await createCampaignRepository(env, principal).reviewTranslationInput(translationReviewMatch[1], input), 200);
+    } catch (error) {
+      const handled = handledInfrastructureError(error);
+      if (handled) return handled;
+      throw error;
+    }
+  }
+
+  const clinicalSimulationMatch = url.pathname.match(/^\/api\/candidates\/([^/]+)\/simulations$/);
+  if (clinicalSimulationMatch && request.method === "POST") {
+    let input;
+    try { input = await request.json(); } catch { return apiError("invalid_json", "Request body must be valid JSON", 400); }
+    const validationError = validateClinicalScenario(input);
+    if (validationError) return apiError("invalid_input", validationError, 400);
+    try {
+      const principal = await authenticateSupabaseRequest(request, env);
+      const simulation = await createCampaignRepository(env, principal).queueClinicalSimulation(clinicalSimulationMatch[1], input);
+      const compute = await dispatchGithubClinical(env, env.UPSTREAM_FETCH ?? globalThis.fetch);
+      return json({ simulation, compute }, 202);
     } catch (error) {
       const handled = handledInfrastructureError(error);
       if (handled) return handled;
